@@ -1,0 +1,56 @@
+name: GMO API Data Pipeline
+
+on:
+  schedule:
+    # 暗号資産: 毎日7:00〜23:00 JST（UTC 22:00〜14:00）
+    - cron: "0 22-23,0-14 * * *"
+  workflow_dispatch:
+
+jobs:
+  run_pipeline:
+    runs-on: ubuntu-latest
+    env:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      DISCORD_FOREX_MAIN: ${{ secrets.DISCORD_FOREX_MAIN }}
+      DISCORD_FOREX_OTHER: ${{ secrets.DISCORD_FOREX_OTHER }}
+      DISCORD_CRYPTO_MAIN: ${{ secrets.DISCORD_CRYPTO_MAIN }}
+      DISCORD_CRYPTO_OTHER: ${{ secrets.DISCORD_CRYPTO_OTHER }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: 3.11
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas requests openai
+
+      - name: Fetch OHLCV data
+        run: python fetch_gmo_ohlcv.py symbols.csv
+
+      - name: Calculate features
+        run: python ohlcv_calc.py symbols.csv
+
+      - name: Prepare AI input
+        run: python prepare_features.py symbols.csv
+
+      - name: Analyze and Notify
+        run: |
+          for f in *_ai_input.csv; do
+            symbol=$(echo $f | sed 's/_ai_input.csv//')
+            type=$(grep $symbol symbols.csv | cut -d',' -f2)
+            
+            # FXは土日スキップ
+            if [ "$type" = "forex" ] && [[ $(date +%u) -gt 5 ]]; then
+              echo "Skipping $symbol (FX on weekend)"
+              continue
+            fi
+
+            # GPTモデルは gpt-3.5-turbo を使用（必要に応じて変更可）
+            python notify_discord.py "$f" --symbol "$symbol" --asset_type "$type" --model gpt-3.5-turbo
+          done
