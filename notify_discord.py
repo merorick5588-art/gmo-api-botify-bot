@@ -1,17 +1,23 @@
+# notify_discord.py
 import os
 import pandas as pd
 import json
 import requests
 from datetime import datetime
+from analyze_ohlcv import analyze_ai_input as analyze_ai
 from analyze_technical import analyze_ai_input as analyze_tech
-from analyze_ohlcv import analyze_ai_input as analyze_ai  # import your AI function
 
 DISCORD_WEBHOOKS = {
-    "forex": {"main": "https://discord.com/api/webhooks/XXXX/XXXX",
-              "other": "https://discord.com/api/webhooks/XXXX/XXXX"},
-    "crypto": {"main": "https://discord.com/api/webhooks/YYYY/YYYY",
-               "other": "https://discord.com/api/webhooks/YYYY/YYYY"}
+    "forex": {
+        "main": os.environ.get("DISCORD_FOREX_MAIN"),
+        "other": os.environ.get("DISCORD_FOREX_OTHER")
+    },
+    "crypto": {
+        "main": os.environ.get("DISCORD_CRYPTO_MAIN"),
+        "other": os.environ.get("DISCORD_CRYPTO_OTHER")
+    }
 }
+
 
 def send_discord(embed, webhook_url):
     payload = {"embeds": [embed]}
@@ -23,9 +29,9 @@ def create_embed(symbol, direction, up_prob, down_prob, ifd_oco):
     description = "=============================="
     fields = [
         {"name": "判定", "value": f"{'上昇' if direction=='up' else '下落'}確率 {up_prob*100:.0f if direction=='up' else down_prob*100:.0f}%", "inline": True},
-        {"name": f"推奨 (Low)", "value": f"指値: {ifd_oco['low']['entry']:.3f}\n利確: {ifd_oco['low']['take_profit']:.3f}\n損切: {ifd_oco['low']['stop_loss']:.3f}"},
-        {"name": f"推奨 (Medium)", "value": f"指値: {ifd_oco['medium']['entry']:.3f}\n利確: {ifd_oco['medium']['take_profit']:.3f}\n損切: {ifd_oco['medium']['stop_loss']:.3f}"},
-        {"name": f"推奨 (High)", "value": f"指値: {ifd_oco['high']['entry']:.3f}\n利確: {ifd_oco['high']['take_profit']:.3f}\n損切: {ifd_oco['high']['stop_loss']:.3f}"}
+        {"name": f"推奨 (Low)", "value": f"指値: {ifd_oco[0]['entry']:.3f}\n利確: {ifd_oco[0]['take_profit']:.3f}\n損切: {ifd_oco[0]['stop_loss']:.3f}"},
+        {"name": f"推奨 (Medium)", "value": f"指値: {ifd_oco[1]['entry']:.3f}\n利確: {ifd_oco[1]['take_profit']:.3f}\n損切: {ifd_oco[1]['stop_loss']:.3f}"},
+        {"name": f"推奨 (High)", "value": f"指値: {ifd_oco[2]['entry']:.3f}\n利確: {ifd_oco[2]['take_profit']:.3f}\n損切: {ifd_oco[2]['stop_loss']:.3f}"}
     ]
     embed = {
         "title": title,
@@ -36,25 +42,16 @@ def create_embed(symbol, direction, up_prob, down_prob, ifd_oco):
     }
     return embed
 
-def calc_ifd_oco(price, direction):
-    """方向に応じてIFD-OCOを計算"""
-    sign = 1 if direction == "up" else -1
-    return {
-        "low": {"entry": price*(1+sign*0.0015), "stop_loss": price*(1-sign*0.0015), "take_profit": price*(1+sign*0.003)},
-        "medium": {"entry": price*(1+sign*0.0035), "stop_loss": price*(1-sign*0.0035), "take_profit": price*(1+sign*0.006)},
-        "high": {"entry": price*(1+sign*0.0075), "stop_loss": price*(1-sign*0.0075), "take_profit": price*(1+sign*0.01)}
-    }
-
 def main():
     for f in os.listdir("."):
         if not f.endswith("_ai_input.csv"):
             continue
-        df = pd.read_csv(f)
+
         symbol = f.replace("_ai_input.csv","")
         asset_type = pd.read_csv("symbols.csv").query(f"symbol=='{symbol}'")["type"].values[0]
 
         # AI解析
-        ai_result = analyze_ai(f)
+        ai_result = analyze_ai(f, symbol, asset_type)
         # テクニカル解析
         tech_result = analyze_tech(f)
 
@@ -69,9 +66,8 @@ def main():
         if ai_dir == tech_dir and ai_prob >= 0.7 and tech_prob >= 0.7:
             # 条件一致 → main channel
             direction = ai_dir
-            price = ai_result["ifd_oco"]["medium"]["entry"]
-            ifd_oco = calc_ifd_oco(price, direction)
-            embed = create_embed(symbol, direction, ai_result["up_probability"], ai_result["down_probability"], ifd_oco)
+            price = ai_result["ifd_oco"][1]["entry"]  # Mediumを基準
+            embed = create_embed(symbol, direction, ai_result["up_probability"], ai_result["down_probability"], ai_result["ifd_oco"])
             send_discord(embed, DISCORD_WEBHOOKS[asset_type]["main"])
         else:
             # 条件不一致または確率不足 → other channel
