@@ -52,5 +52,5 @@ jobs:
             fi
 
             # GPTモデルは gpt-3.5-turbo を使用（必要に応じて変更可）
-            python notify_discord.py "$f" --symbol "$symbol" --asset_type "$type" --model gpt-3.5-turbo
+            python notify_discord.py "$f" --symbol "$symbol" --asset_type "$type" --model gpt-4o-mini
           done
