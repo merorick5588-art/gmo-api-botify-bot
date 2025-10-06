@@ -12,14 +12,14 @@ import argparse
 # ==== 引数処理 ====
 parser = argparse.ArgumentParser()
 parser.add_argument("csv_file", help="_ai_input.csv ファイル")
-parser.add_argument("latest_rates_file", help="最新レート CSV")
+#parser.add_argument("latest_rates_file", help="最新レート CSV")
 parser.add_argument("--symbol", required=True, help="銘柄名 (例: USD_JPY, BTC_USD)")
 parser.add_argument("--asset_type", required=True, choices=["forex","crypto"], help="資産タイプ")
 parser.add_argument("--model", default="gpt-3.5-turbo", help="使用するGPTモデル")
 args = parser.parse_args()
 
 csv_file = args.csv_file
-latest_rates_file = args.latest_rates_file
+#latest_rates_file = args.latest_rates_file
 symbol = args.symbol
 asset_type = args.asset_type
 model_name = args.model
@@ -89,8 +89,8 @@ def main():
     ai_result = analyze_ai(csv_file, symbol, asset_type, model_name=model_name)
 
     # テクニカル解析（最新レート補正済み）
-    tech_result = analyze_tech(csv_file, latest_rates_file, symbol, asset_type)
-
+    #tech_result = analyze_tech(csv_file, latest_rates_file, symbol, asset_type)
+    tech_result = analyze_tech(csv_file, symbol, asset_type)
     # 方向確認
     ai_dir = ai_result["direction"]
     tech_dir = tech_result["direction"]
