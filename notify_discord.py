@@ -1,9 +1,10 @@
-# notify_discord.py
+# notify_discord_full.py
 import os
 import pandas as pd
 import json
 import requests
 from datetime import datetime
+from zoneinfo import ZoneInfo  # JST対応
 from analyze_ohlcv import analyze_ai_input as analyze_ai
 from analyze_technical import analyze_ai_input as analyze_tech
 import argparse
@@ -11,12 +12,14 @@ import argparse
 # ==== 引数処理 ====
 parser = argparse.ArgumentParser()
 parser.add_argument("csv_file", help="_ai_input.csv ファイル")
-parser.add_argument("--symbol", required=True, help="銘柄名 (例: USD_JPY)")
+parser.add_argument("latest_rates_file", help="最新レート CSV")
+parser.add_argument("--symbol", required=True, help="銘柄名 (例: USD_JPY, BTC_USD)")
 parser.add_argument("--asset_type", required=True, choices=["forex","crypto"], help="資産タイプ")
 parser.add_argument("--model", default="gpt-3.5-turbo", help="使用するGPTモデル")
 args = parser.parse_args()
 
 csv_file = args.csv_file
+latest_rates_file = args.latest_rates_file
 symbol = args.symbol
 asset_type = args.asset_type
 model_name = args.model
@@ -39,14 +42,12 @@ def send_discord(embed, webhook_url):
     requests.post(webhook_url, json=payload)
 
 # ==== Embed作成関数 ====
-def create_embed(symbol, ai_up, ai_down, tech_up, tech_down, ifd_oco):
+def create_embed(symbol, ai_up, ai_down, tech_up, tech_down, ifd_oco, direction):
     # AI方向
     if ai_up >= ai_down:
-        direction = "up"
         direction_str = "上昇"
         main_prob = ai_up
     else:
-        direction = "down"
         direction_str = "下落"
         main_prob = ai_down
 
@@ -70,26 +71,29 @@ def create_embed(symbol, ai_up, ai_down, tech_up, tech_down, ifd_oco):
         {"name": f"推奨 (High)", "value": f"指値: {ifd_oco[2]['entry']:.3f}\n利確: {ifd_oco[2]['take_profit']:.3f}\n損切: {ifd_oco[2]['stop_loss']:.3f}"}
     ]
 
+    # JST時刻を表示
+    jst_now = datetime.now(ZoneInfo("Asia/Tokyo")).strftime("%Y-%m-%d %H:%M:%S")
+
     embed = {
-        "title": f"{'📈' if direction=='up' else '📉'} シグナル通知 — {symbol}",
+        "title": f"{'📈' if direction=='buy' else '📉'} シグナル通知 — {symbol}",
         "description": description,
         "color": 3066993,
         "fields": fields,
-        "footer": {"text": f"受信時刻: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"}
+        "footer": {"text": f"受信時刻: {jst_now} JST"}
     }
-
     return embed
 
 # ==== メイン処理 ====
 def main():
-    # AI解析
+    # AI解析（最新レート補正済み）
     ai_result = analyze_ai(csv_file, symbol, asset_type, model_name=model_name)
-    # テクニカル解析
-    tech_result = analyze_tech(csv_file)
+
+    # テクニカル解析（最新レート補正済み）
+    tech_result = analyze_tech(csv_file, latest_rates_file, symbol, asset_type)
 
     # 方向確認
-    ai_dir = "up" if ai_result["up_probability"] > ai_result["down_probability"] else "down"
-    tech_dir = "up" if tech_result["up_probability"] > tech_result["down_probability"] else "down"
+    ai_dir = ai_result["direction"]
+    tech_dir = tech_result["direction"]
 
     # 確率確認
     ai_prob = max(ai_result["up_probability"], ai_result["down_probability"])
@@ -103,7 +107,8 @@ def main():
             ai_down=ai_result["down_probability"],
             tech_up=tech_result["up_probability"],
             tech_down=tech_result["down_probability"],
-            ifd_oco=ai_result["ifd_oco"]
+            ifd_oco=ai_result["ifd_oco"],
+            direction=ai_dir
         )
         send_discord(embed, DISCORD_WEBHOOKS[asset_type]["main"])
     else:
@@ -114,7 +119,8 @@ def main():
             ai_down=ai_result["down_probability"],
             tech_up=tech_result["up_probability"],
             tech_down=tech_result["down_probability"],
-            ifd_oco=ai_result["ifd_oco"]
+            ifd_oco=ai_result["ifd_oco"],
+            direction=ai_dir
         )
         send_discord(embed, DISCORD_WEBHOOKS[asset_type]["other"])
 
