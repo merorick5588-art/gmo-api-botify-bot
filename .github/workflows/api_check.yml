@@ -41,16 +41,31 @@ jobs:
 
       - name: Analyze and Notify
         run: |
-          for f in *_ai_input.csv; do
-            symbol=$(echo $f | sed 's/_ai_input.csv//')
+          # JST曜日取得 (1=月曜, 7=日曜)
+          weekday_jst=$(TZ=Asia/Tokyo date +%u)
+
+          for f in *_ai_input.json; do
+            symbol=$(echo $f | sed 's/_ai_input.json//')
             type=$(grep $symbol symbols.csv | cut -d',' -f2)
-            
-            # FXは土日スキップ
-            if [ "$type" = "forex" ] && [[ $(date +%u) -gt 5 ]]; then
-              echo "Skipping $symbol (FX on weekend)"
+
+            # FXはJST土日スキップ
+            if [ "$type" = "forex" ] && [[ "$weekday_jst" -gt 5 ]]; then
+              echo "Skipping $symbol (FX on weekend JST)"
               continue
             fi
 
-            # GPTモデルは gpt-3.5-turbo を使用（必要に応じて変更可）
-            python notify_discord.py "$f" --symbol "$symbol" --asset_type "$type" --model gpt-4o-mini
+            # 最新レート CSV を銘柄ごとに指定
+            latest_rates_file="${symbol}_latest_rates.csv"
+            if [ ! -f "$latest_rates_file" ]; then
+              echo "Latest rates file not found: $latest_rates_file"
+              continue
+            fi
+
+            # Discord通知スクリプト実行
+            python notify_discord_all.py \
+              --ai_input_file "$f" \
+              --latest_rates_file "$latest_rates_file" \
+              --symbol "$symbol" \
+              --asset_type "$type" \
+              --model gpt-3.5-turbo
           done
