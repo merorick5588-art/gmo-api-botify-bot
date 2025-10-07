@@ -1,126 +1,80 @@
-import pandas as pd
-import sys
-import json
-
 # ==== 簡易テクニカル解析関数 ====
-def calc_prob(latest_row):
-    """
-    SMA, RSI, MACDを組み合わせた簡易ルールで確率計算
-    確率は0〜1に正規化
-    """
+def calc_prob(timeframes):
     up_score = 0
     down_score = 0
 
-    # 15分足
-    if latest_row["15M_SMA_20"] > latest_row["15M_SMA_50"]:
-        up_score += 2
-    else:
-        down_score += 2
+    # 時間足ごとの重み
+    weights = {"15m": 1, "1h": 3, "4h": 1}
 
-    if latest_row["15M_RSI_14"] < 30:
-        up_score += 1
-    elif latest_row["15M_RSI_14"] > 70:
-        down_score += 1
+    for tf, weight in weights.items():
+        fs = timeframes.get(tf, {}).get("features_summary", {})
 
-    if latest_row["15M_MACD"] > latest_row["15M_MACD_signal"]:
-        up_score += 1
-    else:
-        down_score += 1
+        # SMA
+        if fs.get("sma20", 0) > fs.get("sma50", 0):
+            up_score += 1 * weight
+        else:
+            down_score += 1 * weight
 
-    # 1時間足
-    if latest_row["1H_SMA_20"] > latest_row["1H_SMA_50"]:
-        up_score += 3
-    else:
-        down_score += 3
+        # RSI
+        rsi = fs.get("rsi14", 50)
+        if rsi < 30:
+            up_score += 1 * weight
+        elif rsi > 70:
+            down_score += 1 * weight
 
-    if latest_row["1H_RSI_14"] < 30:
-        up_score += 1
-    elif latest_row["1H_RSI_14"] > 70:
-        down_score += 1
-
-    if latest_row["1H_MACD"] > latest_row["1H_MACD_signal"]:
-        up_score += 1
-    else:
-        down_score += 1
-
-    # 4時間足
-    if latest_row["4H_SMA_20"] > latest_row["4H_SMA_50"]:
-        up_score += 1
-    else:
-        down_score += 1
-
-    if latest_row["4H_RSI_14"] < 30:
-        up_score += 0.5
-    elif latest_row["4H_RSI_14"] > 70:
-        down_score += 0.5
-
-    if latest_row["4H_MACD"] > latest_row["4H_MACD_signal"]:
-        up_score += 0.5
-    else:
-        down_score += 0.5
+        # MACD
+        if fs.get("macd", 0) > fs.get("macd_signal", 0):
+            up_score += 0.5 * weight
+        else:
+            down_score += 0.5 * weight
 
     total = up_score + down_score
-    up_prob = round(up_score / total, 2)
-    down_prob = round(down_score / total, 2)
+    up_prob = round(up_score / total, 3) if total > 0 else 0.5
+    down_prob = round(down_score / total, 3) if total > 0 else 0.5
     return up_prob, down_prob
 
+
 # ==== IFD-OCO作成関数 ====
-def create_ifd_oco(current_price, up_prob, down_prob):
-    """
-    確率に応じて買い/売り注文を作成
-    Low: ±0.1〜0.2%
-    Medium: ±0.2〜0.5%
-    High: ±0.5〜1%
-    """
+def create_ifd_oco(latest_price, up_prob, down_prob, asset_type):
     side = "buy" if up_prob >= down_prob else "sell"
-    if side == "buy":
-        sign = 1
+    base_price = latest_price
+
+    # 資産タイプ別OCO幅 (Low=スキャル, Mid=デイトレ, High=スイング)
+    if asset_type == "crypto":
+        ranges = [0.007, 0.025, 0.05]  # 0.7%, 2.5%, 5%
     else:
-        sign = -1
+        ranges = [0.002, 0.006, 0.012]  # 0.2%, 0.6%, 1.2%
 
-    ifd_oco = [
-        {
-            "risk": "low",
-            "entry": round(current_price * (1 + sign * 0.0015), 3),
-            "stop_loss": round(current_price * (1 - sign * 0.0015), 3),
-            "take_profit": round(current_price * (1 + sign * 0.003), 3)
-        },
-        {
-            "risk": "medium",
-            "entry": round(current_price * (1 + sign * 0.0035), 3),
-            "stop_loss": round(current_price * (1 - sign * 0.0035), 3),
-            "take_profit": round(current_price * (1 + sign * 0.0075), 3)
-        },
-        {
-            "risk": "high",
-            "entry": round(current_price * (1 + sign * 0.0075), 3),
-            "stop_loss": round(current_price * (1 - sign * 0.0075), 3),
-            "take_profit": round(current_price * (1 + sign * 0.01), 3)
-        }
-    ]
-    return ifd_oco
+    ifd_oco = []
+    for idx, factor in enumerate(ranges):
+        risk_name = ["Low", "Medium", "High"][idx]
+        if side == "buy":
+            entry = base_price
+            sl = entry * (1 - factor)
+            tp = entry * (1 + factor)
+        else:
+            entry = base_price
+            sl = entry * (1 + factor)
+            tp = entry * (1 - factor)
+        ifd_oco.append({
+            "risk": risk_name,
+            "entry": round(entry, 3),
+            "stop_loss": round(sl, 3),
+            "take_profit": round(tp, 3)
+        })
+    return ifd_oco, side
 
-# ==== CSV解析メイン ====
-def analyze_ai_input(csv_file):
-    df = pd.read_csv(csv_file)
-    latest_row = df.iloc[0]  # 最新行のみ
 
-    up_prob, down_prob = calc_prob(latest_row)
-    current_price = latest_row.get("1H_Close", latest_row.get("Close", 0))
-    ifd_oco = create_ifd_oco(current_price, up_prob, down_prob)
+# ==== JSON解析メイン ====
+def analyze_ai_input(ai_input, symbol, asset_type, latest_price):
+    timeframes = ai_input.get("timeframes", {})
+    up_prob, down_prob = calc_prob(timeframes)
+    ifd_oco, direction = create_ifd_oco(latest_price, up_prob, down_prob, asset_type)
 
     result = {
         "up_probability": up_prob,
         "down_probability": down_prob,
-        "ifd_oco": ifd_oco
+        "ifd_oco": ifd_oco,
+        "direction": direction
     }
     return result
-
-if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("Usage: python analyze_technical.py _ai_input.csv")
-        sys.exit(1)
-
-    csv_file = sys.argv[1]
-    result = analyze_ai_input(csv_file)
-    print(json.dumps(result, indent=2))

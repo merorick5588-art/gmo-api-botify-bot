@@ -1,6 +1,42 @@
 import pandas as pd
 import sys
 import os
+import json
+
+TIMEFRAMES = {
+    "15m": "15min",
+    "1h": "1hour",
+    "4h": "4hour"
+}
+
+def calculate_features(df):
+    df20 = df.tail(20).reset_index(drop=True)
+    returns = df20["Close"].pct_change().dropna()
+
+    features_summary = {
+        "sma20": float(df20["Close"].mean()),
+        "sma50": float(df.tail(50)["Close"].mean()) if len(df) >= 50 else float("nan"),
+        "rsi14": float(df20["RSI_14"].iloc[-1]) if "RSI_14" in df20.columns else float("nan"),
+        "macd": float(df20["MACD"].iloc[-1]) if "MACD" in df20.columns else float("nan"),
+        "macd_signal": float(df20["MACD_signal"].iloc[-1]) if "MACD_signal" in df20.columns else float("nan"),
+        "avg_ret20": float(returns.mean()) if not returns.empty else float("nan"),
+        "std_ret20": float(returns.std()) if not returns.empty else float("nan"),
+        "trend_up_ratio": float((returns > 0).mean()) if not returns.empty else float("nan"),
+        "last_ret": float(returns.iloc[-1]) if not returns.empty else float("nan")
+    }
+
+    recent_rows = df.tail(3).reset_index(drop=True)
+    recent_ohlc = []
+    for _, r in recent_rows.iterrows():
+        recent_ohlc.append({
+            "o": float(r["Open"]),
+            "h": float(r["High"]),
+            "l": float(r["Low"]),
+            "c": float(r["Close"]),
+            "v": float(r["Volume"])
+        })
+
+    return recent_ohlc, features_summary
 
 def prepare_ai_input(symbols_csv):
     df_symbols = pd.read_csv(symbols_csv)
@@ -10,54 +46,35 @@ def prepare_ai_input(symbols_csv):
         market = row["type"]  # crypto or forex
 
         print(f"Processing {symbol} ({market})...")
+        result = {"symbol": symbol, "timeframes": {}}
 
-        # 各時間足の _features.csv を読み込む
-        dfs = {}
-        for interval in ["15min", "1hour", "4hour"]:
+        for tf_label, tf_suffix in TIMEFRAMES.items():
             if market == "forex":
-                fname = f"{symbol}_{interval}_forex_features.csv"
+                fname = f"{symbol}_{tf_suffix}_forex_features.csv"
             else:
-                fname = f"{symbol}_{interval}_features.csv"
-            
+                fname = f"{symbol}_{tf_suffix}_features.csv"
+
             if not os.path.exists(fname):
                 print(f"  File not found: {fname}")
                 continue
-            
+
             df = pd.read_csv(fname, parse_dates=["OpenTime"])
-            dfs[interval] = df
+            if df.empty:
+                print(f"  No data in {fname}")
+                continue
 
-        if "1hour" not in dfs:
-            print(f"  1hour data not found for {symbol}, skipping.")
-            continue
+            recent_ohlc, features_summary = calculate_features(df)
+            result["timeframes"][tf_label] = {
+                "recent_ohlc": recent_ohlc,
+                "features_summary": features_summary
+            }
 
-        # 最新行の取得
-        df_1h_latest = dfs["1hour"].iloc[[-1]].copy()
-        df_1h_latest = df_1h_latest.add_prefix("1H_")
+        out_name = f"{symbol}_ai_input.json"
+        with open(out_name, "w", encoding="utf-8") as f:
+            json.dump(result, f, ensure_ascii=False, indent=2)
 
-        # 15分足の最新行（直近1本）
-        if "15min" in dfs:
-            df_15m_latest = dfs["15min"].iloc[[-1]].copy()
-            df_15m_latest = df_15m_latest.add_prefix("15M_")
-        else:
-            df_15m_latest = pd.DataFrame()
+        print(f"  Saved AI input JSON: {out_name}")
 
-        # 4時間足の最新行（直近1本）
-        if "4hour" in dfs:
-            df_4h_latest = dfs["4hour"].iloc[[-1]].copy()
-            df_4h_latest = df_4h_latest.add_prefix("4H_")
-        else:
-            df_4h_latest = pd.DataFrame()
-
-        # 結合
-        df_ai_input = df_1h_latest
-        if not df_15m_latest.empty:
-            df_ai_input = pd.concat([df_ai_input.reset_index(drop=True), df_15m_latest.reset_index(drop=True)], axis=1)
-        if not df_4h_latest.empty:
-            df_ai_input = pd.concat([df_ai_input, df_4h_latest.reset_index(drop=True)], axis=1)
-
-        out_name = f"{symbol}_ai_input.csv"
-        df_ai_input.to_csv(out_name, index=False)
-        print(f"  Saved AI input CSV: {out_name}")
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
