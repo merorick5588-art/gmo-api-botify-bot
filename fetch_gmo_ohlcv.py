@@ -11,7 +11,7 @@ FOREX_TICKER_URL = "https://forex-api.coin.z.com/public/v1/ticker"
 
 def fetch_ohlcv(symbol: str, interval: str, market: str, price_type: str = "BID", days: int = 30):
     """
-    GMO APIからOHLCVデータを取得する
+    GMO APIからOHLCVデータを取得
     """
     dfs = []
 
@@ -36,10 +36,9 @@ def fetch_ohlcv(symbol: str, interval: str, market: str, price_type: str = "BID"
                 dfs.append(df[["OpenTime", "Open", "High", "Low", "Close", "Volume"]])
             except Exception as e:
                 print(f"{market} {symbol} fetch error ({yr}): {e}")
-            time.sleep(0.5)  # API制限対策
+            time.sleep(0.5)
 
     else:
-        # 分足・1時間足は日単位で過去days日ループ
         today = datetime.now().date()
         for i in range(days):
             date_iter = today - timedelta(days=i)
@@ -73,18 +72,32 @@ def fetch_ohlcv(symbol: str, interval: str, market: str, price_type: str = "BID"
 def fetch_latest_price(symbol: str, market: str):
     """
     最新レート (bid/ask) を取得
+    GMOコインのFOREXは全銘柄一括返却なので、symbolで抽出
     """
     url = FOREX_TICKER_URL if market == "forex" else CRYPTO_TICKER_URL
     try:
-        resp = requests.get(url, params={"symbol": symbol})
+        resp = requests.get(url)
         jd = resp.json()
         if jd.get("status") != 0 or "data" not in jd or not jd["data"]:
             return None
-        data = jd["data"][0]
-        bid = float(data["bid"])
-        ask = float(data["ask"])
+
+        target = None
+        if market == "forex":
+            for d in jd["data"]:
+                if d["symbol"] == symbol:
+                    target = d
+                    break
+        else:
+            target = jd["data"][0]  # cryptoは従来通り
+
+        if not target:
+            return None
+
+        bid = float(target["bid"])
+        ask = float(target["ask"])
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         return {"symbol": symbol, "type": market, "bid": bid, "ask": ask, "timestamp": ts}
+
     except Exception as e:
         print(f"Error fetching latest price for {symbol}: {e}")
         return None
@@ -117,11 +130,7 @@ if __name__ == "__main__":
                 continue
 
             # 保存ファイル名
-            if market == "forex":
-                out_name = f"{symbol}_{interval}_forex.csv"
-            else:
-                out_name = f"{symbol}_{interval}.csv"
-
+            out_name = f"{symbol}_{interval}_{market}.csv"
             df.to_csv(out_name, index=False)
             print(f"Saved {out_name}")
 
@@ -131,4 +140,3 @@ if __name__ == "__main__":
         out_name = f"{symbol}_latest_rates.csv"
         pd.DataFrame([latest]).to_csv(out_name, index=False)
         print(f"Saved {out_name}")
-
