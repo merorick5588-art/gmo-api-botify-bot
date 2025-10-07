@@ -61,7 +61,7 @@ def main(symbols_csv: str):
             if market == "forex":
                 file_name = f"{symbol}_{interval}_forex.csv"
             else:
-                file_name = f"{symbol}_{interval}.csv"
+                file_name = f"{symbol}_{interval}_crypto.csv"
 
             process_csv(file_name)
 

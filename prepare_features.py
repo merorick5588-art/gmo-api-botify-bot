@@ -52,7 +52,7 @@ def prepare_ai_input(symbols_csv):
             if market == "forex":
                 fname = f"{symbol}_{tf_suffix}_forex_features.csv"
             else:
-                fname = f"{symbol}_{tf_suffix}_features.csv"
+                fname = f"{symbol}_{tf_suffix}_crypto_features.csv"
 
             if not os.path.exists(fname):
                 print(f"  File not found: {fname}")
