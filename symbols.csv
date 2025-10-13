@@ -1,6 +1,5 @@
 symbol,type
 USD_JPY,forex
-MXN_JPY,forex
-XRP_JPY,crypto
+EUR_JPY,forex
 ETH_JPY,crypto
 DOGE_JPY,crypto
