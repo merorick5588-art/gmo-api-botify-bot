@@ -122,7 +122,7 @@ def main():
     ai_prob = max(ai_result["up_probability"], ai_result["down_probability"])
     tech_prob = max(tech_result["up_probability"], tech_result["down_probability"])
 
-    webhook_url = DISCORD_WEBHOOKS[args.asset_type]["main"] if ai_dir == tech_dir and ai_prob >= 0.7 and tech_prob >= 0.7 else DISCORD_WEBHOOKS[args.asset_type]["other"]
+    webhook_url = DISCORD_WEBHOOKS[args.asset_type]["main"] if ai_dir == tech_dir and ai_prob >= 0.5 and tech_prob >= 0.5 else DISCORD_WEBHOOKS[args.asset_type]["other"]
     send_discord(embed, webhook_url)
 
 if __name__ == "__main__":

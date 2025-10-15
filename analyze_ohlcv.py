@@ -51,16 +51,19 @@ Bid={bid}, Ask={ask}
 参考: {scale_hint}
 
 タスク:
-1. 今後の上昇確率(up_probability)と下落確率(down_probability)を0〜1で算出
+1. 今後の1~4時間の上昇・下落方向を -1～1 (小数点第2位まで)の範囲で評価せよ
+   - +1 = 上昇確率100%（強い上昇トレンド予想）
+   -  0 = 中立（上昇・下落が拮抗）
+   - -1 = 下落確率100%（強い下落トレンド予想）
+   この値を "trend_score" として出力すること。
 2. 押し目買い・戻り売りを意識したIFD-OCO注文案を作成
-   - 買いの場合はAskを基準にEntryを設定
-   - 売りの場合はBidを基準にEntryを設定
+   - 買いの場合("trend_score">0)はAskを基準にEntryを設定
+   - 売りの場合("trend_score"<0)はBidを基準にEntryを設定
    - stop_loss, take_profit の水準は上記の変動レンジを考慮して自由に設計
 3. Low/Medium/Highはスキャルピング・デイトレード・スイングに対応
 出力形式(JSON):
 {{
-  "up_probability": float,
-  "down_probability": float,
+  "trend_score": float,
   "direction": "buy" or "sell",
   "ifd_oco": [
     {{"risk": "Low", "entry": float, "stop_loss": float, "take_profit": float}},
@@ -92,12 +95,18 @@ Bid={bid}, Ask={ask}
         print(f"AIの出力をJSONに変換できませんでした:\n{ai_output}")
         return None
 
-    # 確率を正規化して0〜1に収める
-    up_prob = round(min(max(result.get("up_probability", 0), 0), 1), 3)
-    down_prob = round(min(max(result.get("down_probability", 0), 0), 1), 3)
+    # === trend_scoreから確率を算出 ===
+    trend_score = result.get("trend_score", 0)
+
+    if trend_score >= 0:
+        up_prob = trend_score
+        down_prob = 0.0
+    else:
+        up_prob = 0.0
+        down_prob = abs(trend_score)
+
     result["up_probability"] = up_prob
     result["down_probability"] = down_prob
-
     return result
 
 

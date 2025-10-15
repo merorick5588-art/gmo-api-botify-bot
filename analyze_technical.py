@@ -1,5 +1,8 @@
 # ==== 簡易テクニカル解析関数 ====
-def calc_prob(timeframes):
+def calc_trend_score(timeframes):
+    """
+    各時間足の特徴量をもとに -1〜1 の trend_score を計算
+    """
     up_score = 0
     down_score = 0
 
@@ -29,14 +32,17 @@ def calc_prob(timeframes):
             down_score += 0.5 * weight
 
     total = up_score + down_score
-    up_prob = round(up_score / total, 3) if total > 0 else 0.5
-    down_prob = round(down_score / total, 3) if total > 0 else 0.5
-    return up_prob, down_prob
+    if total == 0:
+        return 0.0  # 中立
+
+    # 上昇優勢なら正、下落優勢なら負（-1〜1に正規化）
+    trend_score = round((up_score - down_score) / total, 3)
+    return trend_score
 
 
 # ==== IFD-OCO作成関数 ====
-def create_ifd_oco(latest_price, up_prob, down_prob, asset_type):
-    side = "buy" if up_prob >= down_prob else "sell"
+def create_ifd_oco(latest_price, trend_score, asset_type):
+    side = "buy" if trend_score >= 0 else "sell"
     base_price = latest_price
 
     # 資産タイプ別OCO幅 (Low=スキャル, Mid=デイトレ, High=スイング)
@@ -68,8 +74,19 @@ def create_ifd_oco(latest_price, up_prob, down_prob, asset_type):
 # ==== JSON解析メイン ====
 def analyze_ai_input(ai_input, symbol, asset_type, latest_price):
     timeframes = ai_input.get("timeframes", {})
-    up_prob, down_prob = calc_prob(timeframes)
-    ifd_oco, direction = create_ifd_oco(latest_price, up_prob, down_prob, asset_type)
+
+    # -1〜1のスコアを計算
+    trend_score = calc_trend_score(timeframes)
+
+    # 確率を算出（0〜100%）
+    if trend_score >= 0:
+        up_prob = trend_score
+        down_prob = 0.0
+    else:
+        up_prob = 0.0
+        down_prob = abs(trend_score)
+
+    ifd_oco, direction = create_ifd_oco(latest_price, trend_score, asset_type)
 
     result = {
         "up_probability": up_prob,
