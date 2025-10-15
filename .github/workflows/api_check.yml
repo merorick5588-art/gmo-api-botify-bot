@@ -84,5 +84,5 @@ jobs:
               --latest_rates_file "$latest_rates_file" \
               --symbol "$symbol" \
               --asset_type "$type" \
-              --model gpt-5-mini
+              --model gpt-4o-mini
           done
