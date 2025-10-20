@@ -1,27 +1,11 @@
 name: GMO API Data Pipeline
 
 on:
-  schedule:
-    # JST 7:00〜23:00 = UTC 22:00〜14:00
-    - cron: "0 22 * * *"  # JST 7:00
-    - cron: "0 23 * * *"  # JST 8:00
-    - cron: "0 0 * * *"   # JST 9:00
-    - cron: "0 1 * * *"   # JST 10:00
-    - cron: "0 2 * * *"   # JST 11:00
-    - cron: "0 3 * * *"   # JST 12:00
-    - cron: "0 4 * * *"   # JST 13:00
-    - cron: "0 5 * * *"   # JST 14:00
-    - cron: "0 6 * * *"   # JST 15:00
-    - cron: "0 7 * * *"   # JST 16:00
-    - cron: "0 8 * * *"   # JST 17:00
-    - cron: "0 9 * * *"   # JST 18:00
-    - cron: "0 10 * * *"  # JST 19:00
-    - cron: "0 11 * * *"  # JST 20:00
-    - cron: "0 12 * * *"  # JST 21:00
-    - cron: "0 13 * * *"  # JST 22:00
-    - cron: "0 14 * * *"  # JST 23:00
+  workflow_dispatch:  # 外部からAPI経由で実行できるようにする
 
-  workflow_dispatch:
+concurrency:
+  group: gmo-data-pipeline
+  cancel-in-progress: true
 
 jobs:
   run_pipeline:
@@ -71,14 +55,12 @@ jobs:
               continue
             fi
 
-            # 最新レート CSV を銘柄ごとに指定
             latest_rates_file="${symbol}_latest_rates.csv"
             if [ ! -f "$latest_rates_file" ]; then
               echo "Latest rates file not found: $latest_rates_file"
               continue
             fi
 
-            # Discord通知スクリプト実行
             python notify_discord_all.py \
               --ai_input_file "$f" \
               --latest_rates_file "$latest_rates_file" \
