@@ -1,7 +1,7 @@
 name: GMO API Data Pipeline
 
 on:
-  workflow_dispatch:  # 外部からAPI経由で実行できるようにする
+  workflow_dispatch:  # 手動実行のみ
 
 concurrency:
   group: gmo-data-pipeline
@@ -10,6 +10,7 @@ concurrency:
 jobs:
   run_pipeline:
     runs-on: ubuntu-latest
+
     env:
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       DISCORD_FOREX_MAIN: ${{ secrets.DISCORD_FOREX_MAIN }}
@@ -29,42 +30,53 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pandas requests openai
+          pip install pandas requests openai beautifulsoup4 feedparser
 
-      - name: Fetch OHLCV data
-        run: python fetch_gmo_ohlcv.py symbols.csv
-
-      - name: Calculate features
-        run: python ohlcv_calc.py symbols.csv
-
-      - name: Prepare AI input
-        run: python prepare_features.py symbols.csv
-
-      - name: Analyze and Notify
+      - name: Run pipeline for each symbol
         run: |
-          # JST曜日取得 (1=月曜, 7=日曜)
           weekday_jst=$(TZ=Asia/Tokyo date +%u)
+          hour_jst=$(TZ=Asia/Tokyo date +%H)
 
-          for f in *_ai_input.json; do
-            symbol=$(echo $f | sed 's/_ai_input.json//')
-            type=$(grep $symbol symbols.csv | cut -d',' -f2)
+          # ヘッダ行を除いて1行ずつ処理
+          tail -n +2 symbols.csv | while IFS=',' read -r symbol type; do
+            echo "=== Processing $symbol ($type) ==="
 
-            # FXはJST土日スキップ
+            # === FXは週末スキップ ===
             if [ "$type" = "forex" ] && [[ "$weekday_jst" -gt 5 ]]; then
-              echo "Skipping $symbol (FX on weekend JST)"
+              echo "Skipping $symbol (FX weekend)"
               continue
             fi
 
+            # === symbol_target.csv 作成 ===
+            echo "symbol,type" > symbol_target.csv
+            echo "$symbol,$type" >> symbol_target.csv
+
+            # === 各処理 ===
+            python fetch_gmo_ohlcv.py symbol_target.csv
+            python ohlcv_calc.py symbol_target.csv
+            python prepare_features.py symbol_target.csv
+
+            # === AI分析 & 通知 ===
+            ai_input_file="${symbol}_ai_input.json"
             latest_rates_file="${symbol}_latest_rates.csv"
-            if [ ! -f "$latest_rates_file" ]; then
-              echo "Latest rates file not found: $latest_rates_file"
-              continue
+
+            if [ -f "$ai_input_file" ] && [ -f "$latest_rates_file" ]; then
+              python notify_discord_all.py \
+                --ai_input_file "$ai_input_file" \
+                --latest_rates_file "$latest_rates_file" \
+                --symbol "$symbol" \
+                --asset_type "$type" \
+                --model gpt-5-mini
+            else
+              echo "Missing files for $symbol"
             fi
 
-            python notify_discord_all.py \
-              --ai_input_file "$f" \
-              --latest_rates_file "$latest_rates_file" \
-              --symbol "$symbol" \
-              --asset_type "$type" \
-              --model gpt-5-mini
+            echo "=== Finished $symbol ==="
+            echo
           done
+
+          # === 朝7時台ニュース通知 ===
+          if [[ "$hour_jst" -eq 7 ]]; then
+            echo "🕖 JST 7時台 → 為替ニュース通知を実行"
+            python forex_news_notify.py --symbols_file symbols.csv --model gpt-5-mini
+          fi
