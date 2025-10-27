@@ -5,6 +5,7 @@ import datetime
 import requests
 import argparse
 import pandas as pd
+from dateutil import parser as date_parser
 
 # ====== 設定 ======
 NEWS_FEEDS = [
@@ -18,23 +19,55 @@ DISCORD_WEBHOOK = os.getenv("DISCORD_FOREX_MAIN")
 
 # ====== ニュース取得 ======
 def fetch_news():
+    # JST現在時刻
+    now_jst = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=9)))
+    today_7am = now_jst.replace(hour=7, minute=0, second=0, microsecond=0)
+    if now_jst.hour < 7:
+        # 朝7時前に実行された場合 → 前日の7:00～今日7:00まで
+        start_jst = today_7am - datetime.timedelta(days=1)
+        end_jst = today_7am
+    else:
+        # 朝7時以降に実行された場合 → 今日7:00～明日7:00まで
+        start_jst = today_7am
+        end_jst = today_7am + datetime.timedelta(days=1)
+
+    print(f"📅 対象期間: {start_jst.strftime('%Y-%m-%d %H:%M')} ～ {end_jst.strftime('%Y-%m-%d %H:%M')} JST")
+
     news_items = []
     for url in NEWS_FEEDS:
         feed = feedparser.parse(url)
-        for e in feed.entries[:8]:
+        for e in feed.entries:
+            published_raw = getattr(e, "published", "") or getattr(e, "updated", "")
+            try:
+                published_dt = date_parser.parse(published_raw)
+                if published_dt.tzinfo is None:
+                    published_dt = published_dt.replace(tzinfo=datetime.timezone.utc)
+                published_jst = published_dt.astimezone(datetime.timezone(datetime.timedelta(hours=9)))
+            except Exception:
+                continue
+
+            # 対象期間に含まれるニュースのみ抽出
+            if not (start_jst <= published_jst < end_jst):
+                continue
+
             title = e.title
-            published = getattr(e, "published", "")
-            news_items.append(f"・{title}（{published}）")
-    return "\n".join(news_items)
+            news_items.append(f"・{title}（{published_jst.strftime('%Y-%m-%d %H:%M')} JST）")
+
+    if not news_items:
+        return "該当する期間内のニュースはありません。"
+
+    return "\n".join(news_items[:30])  # 多すぎる場合は上限30件
+
 
 # ====== GPTによる分析 ======
-def analyze_news(news_text: str, symbols: list[str]) -> str:
+def analyze_news(news_text: str, symbols: list[str], model: str) -> str:
     today = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=9))).strftime("%Y-%m-%d（%a）")
     symbol_list = ", ".join(symbols)
-    
+
     prompt = f"""
 あなたは熟練した外国為替アナリストです。
-以下の最新ニュースから、本日（{today}）の為替相場に影響しそうな重要イベント・発言・経済指標を3つ挙げてください。
+以下の最新ニュースから、本日（{today} 7:00 JST〜翌日7:00 JST）の為替相場に影響しそうな
+重要イベント・発言・経済指標を3つ挙げてください。
 対象は次の通貨ペアに関連するものに絞ってください：{symbol_list}
 
 それぞれについて以下を日本語でまとめてください：
@@ -47,10 +80,11 @@ def analyze_news(news_text: str, symbols: list[str]) -> str:
 """
 
     response = client.chat.completions.create(
-        model="gpt-5-mini",
+        model=model,
         messages=[{"role": "user", "content": prompt}],
     )
     return response.choices[0].message.content
+
 
 # ====== Discord送信 ======
 def send_discord(message: str):
@@ -59,6 +93,7 @@ def send_discord(message: str):
         return
     payload = {"content": message}
     requests.post(DISCORD_WEBHOOK, json=payload)
+
 
 # ====== メイン処理 ======
 def main():
@@ -71,10 +106,11 @@ def main():
     forex_symbols = df[df["type"] == "forex"]["symbol"].tolist()
 
     news_text = fetch_news()
-    analysis = analyze_news(news_text, forex_symbols)
+    analysis = analyze_news(news_text, forex_symbols, args.model)
 
-    header = "🌅 **本日の為替注目ニュース (7:00 JST)**\n"
+    header = "🌅 **本日の為替注目ニュース (7:00 JST〜翌7:00 JST)**\n"
     send_discord(header + analysis)
+
 
 if __name__ == "__main__":
     main()
