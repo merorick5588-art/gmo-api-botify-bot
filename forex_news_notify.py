@@ -1,6 +1,6 @@
 import os
 import feedparser
-import openai
+from openai import OpenAI
 import datetime
 import requests
 import argparse
@@ -13,7 +13,7 @@ NEWS_FEEDS = [
     "https://feeds.bbci.co.uk/news/business/rss.xml",
 ]
 
-openai.api_key = os.getenv("OPENAI_API_KEY")
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 DISCORD_WEBHOOK = os.getenv("DISCORD_FOREX_MAIN")
 
 # ====== ニュース取得 ======
@@ -46,11 +46,11 @@ def analyze_news(news_text: str, symbols: list[str]) -> str:
 {news_text}
 """
 
-    response = openai.ChatCompletion.create(
+    response = client.chat.completions.create(
         model="gpt-5-mini",
         messages=[{"role": "user", "content": prompt}],
     )
-    return response.choices[0].message["content"]
+    return response.choices[0].message.content
 
 # ====== Discord送信 ======
 def send_discord(message: str):
