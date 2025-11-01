@@ -78,5 +78,5 @@ jobs:
           # === 朝7時台ニュース通知 ===
           if [[ "$hour_jst" -eq 7 ]]; then
             echo "🕖 JST 7時台 → 為替ニュース通知を実行"
-            python forex_news_notify.py --symbols_file symbols.csv --model gpt-5-mini
+            #python forex_news_notify.py --symbols_file symbols.csv --model gpt-5-mini
           fi
