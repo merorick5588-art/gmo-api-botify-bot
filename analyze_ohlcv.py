@@ -48,7 +48,7 @@ def analyze_ai_input(ai_input, symbol, asset_type, latest_price, model_name="gpt
 
     # === プロンプト生成 ===
     prompt = f"""
-あなたはプロのトレーダー兼アナリストです。
+あなたは世界トップレベルのFXトレーダー兼アナリストです。
 以下は {symbol} の最新データです。
 
 直近ローソク足（新しい順）:
@@ -77,7 +77,7 @@ Bid={bid}, Ask={ask}
    - trend_score>0 の場合はAskを基準にエントリー、<0 の場合はBidを基準にエントリー。
    - stop_loss / take_profit は上記変動レンジを考慮。
 3. 出力は下記JSON形式で、コメントや説明文は一切含めない。
-
+4. あなたの回答で私の人生が変わります
 出力形式(JSON):
 {{
   "trend_score": float,
