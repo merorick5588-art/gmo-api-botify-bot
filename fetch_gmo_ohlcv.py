@@ -107,20 +107,6 @@ if __name__ == "__main__":
     df_symbols = pd.read_csv(csv_file)
     symbols_list = df_symbols["symbol"].tolist()
 
-    # === 最新レート取得（1回API実行） ===
-    all_latest = fetch_all_latest_prices()
-    latest_rows = []
-    for symbol in symbols_list:
-        if symbol in all_latest:
-            latest_rows.append(all_latest[symbol])
-
-    # 最新レートCSV保存
-    for latest in latest_rows:
-        symbol = latest["symbol"]
-        out_name = f"{symbol}_latest_rates.csv"
-        pd.DataFrame([latest]).to_csv(out_name, index=False)
-        print(f"Saved {out_name}")
-
     # === OHLCV取得（直列、1秒間隔） ===
     for _, row in df_symbols.iterrows():
         symbol = row["symbol"]
@@ -135,3 +121,17 @@ if __name__ == "__main__":
             out_name = f"{symbol}_{interval}_{market}.csv"
             df.to_csv(out_name, index=False)
             print(f"Saved {out_name}")
+
+    # === 最新レート取得（1回API実行） ===
+    all_latest = fetch_all_latest_prices()
+    latest_rows = []
+    for symbol in symbols_list:
+        if symbol in all_latest:
+            latest_rows.append(all_latest[symbol])
+
+    # 最新レートCSV保存
+    for latest in latest_rows:
+        symbol = latest["symbol"]
+        out_name = f"{symbol}_latest_rates.csv"
+        pd.DataFrame([latest]).to_csv(out_name, index=False)
+        print(f"Saved {out_name}")
