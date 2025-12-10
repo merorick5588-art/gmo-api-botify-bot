@@ -95,7 +95,7 @@ def fetch_all_latest_prices():
     return all_data
 
 if __name__ == "__main__":
-    csv_file = "symbols.csv"
+    csv_file = "symbols_target.csv"
     intervals = ["15min", "1hour", "4hour"]
     days = 30
 
