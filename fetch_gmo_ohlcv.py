@@ -1,3 +1,4 @@
+import sys
 import requests
 import pandas as pd
 from datetime import datetime, timedelta, date
@@ -95,7 +96,11 @@ def fetch_all_latest_prices():
     return all_data
 
 if __name__ == "__main__":
-    csv_file = "symbols_target.csv"
+    if len(sys.argv) < 2:
+        print("Usage: python script_name.py <symbols_csv_file>")
+        sys.exit(1)
+
+    csv_file = sys.argv[1]  # 実行時引数からCSVファイル名を取得
     intervals = ["15min", "1hour", "4hour"]
     days = 30
 
