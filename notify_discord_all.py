@@ -64,7 +64,7 @@ def create_embed(symbol, ai_result, tech_result, latest_price):
     for oco in ai_result["ifd_oco"]:
         fields.append({
             "name": f"推奨 ({oco['risk']})",
-            "value": f"指値: {oco['entry']:.3f}\n利確: {oco['take_profit']:.3f}\n損切: {oco['stop_loss']:.3f}"
+            "value": f"指値: {oco['entry']:.5f}\n利確: {oco['take_profit']:.5f}\n損切: {oco['stop_loss']:.5f}"
         })
 
     # JST受信時刻
