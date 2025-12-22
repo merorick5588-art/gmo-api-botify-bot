@@ -1,97 +1,77 @@
-# ==== 簡易テクニカル解析関数 ====
-def calc_trend_score(timeframes):
+# analyze_technical.py
+
+def evaluate_technical_risk(timeframes, direction=None):
     """
-    各時間足の特徴量をもとに -1〜1 の trend_score を計算
+    テクニカルは以下2役割
+    1) LLM呼び出し可否（llm_call_allowed）
+    2) LLM後の拒否権（block）
+
+    direction: "buy" / "sell" / None
     """
-    up_score = 0
-    down_score = 0
 
-    # 時間足ごとの重み
-    weights = {"15m": 1, "1h": 3, "4h": 1}
+    warnings = []
+    block = False
 
-    for tf, weight in weights.items():
-        fs = timeframes.get(tf, {}).get("features_summary", {})
+    # ===== 4h 最重要 =====
+    tf_4h = timeframes.get("4h", {})
+    fs_4h = tf_4h.get("features_summary", {})
+    phase_4h = tf_4h.get("market_phase", {}).get("label", "")
 
-        # SMA
-        if fs.get("sma20", 0) > fs.get("sma50", 0):
-            up_score += 1 * weight
-        else:
-            down_score += 1 * weight
+    rsi_4h = fs_4h.get("rsi14", 50)
 
-        # RSI
-        rsi = fs.get("rsi14", 50)
-        if rsi < 30:
-            up_score += 1 * weight
-        elif rsi > 70:
-            down_score += 1 * weight
+    # ===== 15m / 1h =====
+    tf_15m = timeframes.get("15m", {})
+    phase_15m = tf_15m.get("market_phase", {}).get("label", "")
 
-        # MACD
-        if fs.get("macd", 0) > fs.get("macd_signal", 0):
-            up_score += 0.5 * weight
-        else:
-            down_score += 0.5 * weight
+    tf_1h = timeframes.get("1h", {})
+    phase_1h = tf_1h.get("market_phase", {}).get("label", "")
 
-    total = up_score + down_score
-    if total == 0:
-        return 0.0  # 中立
+    # ===== Stage1 : LLM呼び出し判定 =====
+    llm_call_allowed = True
 
-    # 上昇優勢なら正、下落優勢なら負（-1〜1に正規化）
-    trend_score = round((up_score - down_score) / total, 3)
-    return trend_score
+    if "range" in phase_4h or phase_4h == "":
+        llm_call_allowed = False
 
+    if ("uptrend" in phase_15m and "downtrend" in phase_1h) or \
+       ("downtrend" in phase_15m and "uptrend" in phase_1h):
+        llm_call_allowed = False
 
-# ==== IFD-OCO作成関数 ====
-def create_ifd_oco(latest_price, trend_score, asset_type):
-    side = "buy" if trend_score >= 0 else "sell"
-    base_price = latest_price
+    # ===== Stage2 : 拒否権（LLM後） =====
+    if direction:
+        # --- RSI ---
+        if direction == "buy" and rsi_4h >= 75:
+            block = True
+            warnings.append("4h RSIが過熱（買い危険）")
 
-    # 資産タイプ別OCO幅 (Low=スキャル, Mid=デイトレ, High=スイング)
-    if asset_type == "crypto":
-        ranges = [0.007, 0.025, 0.05]  # 0.7%, 2.5%, 5%
-    else:
-        ranges = [0.002, 0.006, 0.012]  # 0.2%, 0.6%, 1.2%
+        if direction == "sell" and rsi_4h <= 25:
+            block = True
+            warnings.append("4h RSIが売られすぎ（売り危険）")
 
-    ifd_oco = []
-    for idx, factor in enumerate(ranges):
-        risk_name = ["Low", "Medium", "High"][idx]
-        if side == "buy":
-            entry = base_price
-            sl = entry * (1 - factor)
-            tp = entry * (1 + factor)
-        else:
-            entry = base_price
-            sl = entry * (1 + factor)
-            tp = entry * (1 - factor)
-        ifd_oco.append({
-            "risk": risk_name,
-            "entry": round(entry, 3),
-            "stop_loss": round(sl, 3),
-            "take_profit": round(tp, 3)
-        })
-    return ifd_oco, side
+        # --- 上位足逆行 ---
+        if direction == "buy" and "downtrend" in phase_4h:
+            block = True
+            warnings.append("4hが下降トレンド")
 
+        if direction == "sell" and "uptrend" in phase_4h:
+            block = True
+            warnings.append("4hが上昇トレンド")
 
-# ==== JSON解析メイン ====
-def analyze_ai_input(ai_input, symbol, asset_type, latest_price):
-    timeframes = ai_input.get("timeframes", {})
+        # --- 短期警告 ---
+        if direction == "buy" and "downtrend" in phase_15m:
+            warnings.append("15mが逆行中")
 
-    # -1〜1のスコアを計算
-    trend_score = calc_trend_score(timeframes)
+        if direction == "sell" and "uptrend" in phase_15m:
+            warnings.append("15mが逆行中")
 
-    # 確率を算出（0〜100%）
-    if trend_score >= 0:
-        up_prob = trend_score
-        down_prob = 0.0
-    else:
-        up_prob = 0.0
-        down_prob = abs(trend_score)
-
-    ifd_oco, direction = create_ifd_oco(latest_price, trend_score, asset_type)
-
-    result = {
-        "up_probability": up_prob,
-        "down_probability": down_prob,
-        "ifd_oco": ifd_oco,
-        "direction": direction
+    return {
+        "llm_call_allowed": llm_call_allowed,
+        "block": block,
+        "warnings": warnings
     }
-    return result
+
+
+def analyze_ai_input(ai_input, symbol, asset_type, latest_price, llm_result=None):
+    timeframes = ai_input.get("timeframes", {})
+    direction = llm_result.get("direction") if llm_result else None
+
+    return evaluate_technical_risk(timeframes, direction)

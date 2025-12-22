@@ -24,6 +24,14 @@ def analyze_ai_input(ai_input, symbol, asset_type, latest_price, model_name="gpt
         "4h": ai_input["timeframes"]["4h"]["features_summary"]
     }
 
+    market_phase = {
+        "15m": ai_input["timeframes"]["15m"]["market_phase"],
+        "1h": ai_input["timeframes"]["1h"]["market_phase"],
+        "4h": ai_input["timeframes"]["4h"]["market_phase"]
+    }
+
+    timeframe_relationship = ai_input.get("timeframe_relationship")
+
     # === 最新レート ===
     bid = ai_input.get("latest_rate", {}).get("bid", latest_price)
     ask = ai_input.get("latest_rate", {}).get("ask", latest_price)
@@ -57,6 +65,12 @@ def analyze_ai_input(ai_input, symbol, asset_type, latest_price, model_name="gpt
 特徴量サマリ:
 {json.dumps(features_summary, ensure_ascii=False, indent=2)}
 
+市場構造（事前計算済み・高信頼）:
+{json.dumps(market_phase, ensure_ascii=False, indent=2)}
+
+時間足の関係性:
+{json.dumps(timeframe_relationship, ensure_ascii=False, indent=2)}
+
 最新レート:
 Bid={bid}, Ask={ask}
 
@@ -69,15 +83,22 @@ Bid={bid}, Ask={ask}
    - +1 = 強い上昇傾向
    -  0 = 中立
    - -1 = 強い下落傾向
+   目安:
+   ±0.1〜0.3 = 弱い傾き（様子見寄り）
+   ±0.4〜0.6 = 明確な方向性
+   ±0.7〜1.0 = 強いトレンド
    この値を "trend_score" として出力。
+
 2. IFD-OCO注文案を3種類作成：
    - "Low" = リスク低めの安全トレード
    - "Medium" = 通常リスク
    - "High" = ボラティリティを活かした攻めのトレード
+   - dominant timeframe の方向に沿った順張りを基本とする。
    - trend_score>0 の場合はAskを基準にエントリー、<0 の場合はBidを基準にエントリー。
    - stop_loss / take_profit は上記変動レンジを考慮。
+
 3. 出力は下記JSON形式で、コメントや説明文は一切含めない。
-4. あなたの回答で私の人生が大きく左右されるので熟考の上答えを出すこと
+
 出力形式(JSON):
 {{
   "trend_score": float,
