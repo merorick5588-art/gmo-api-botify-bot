@@ -156,7 +156,7 @@ def main():
     if prob < 0.5:
         return
 
-    if prob >= 0.65:
+    if prob >= 0.6:
         send_discord(embed, main_webhook)
 
 if __name__ == "__main__":
