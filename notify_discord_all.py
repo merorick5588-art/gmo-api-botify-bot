@@ -63,21 +63,22 @@ def create_embed(symbol, ai_result, tech_result, latest_price):
         "color": 3066993,
         "fields": fields,
         "footer": {
-            "text": datetime.now(ZoneInfo("Asia/Tokyo")).strftime('%Y-%m-%d %H:%M:%S JST')
+            "text": datetime.now(ZoneInfo("Asia/Tokyo")).strftime("%Y-%m-%d %H:%M:%S JST")
         }
     }
 
-def create_skip_embed(symbol, reason):
+def create_skip_embed(symbol, reasons):
+    reason_text = "\n".join(f"・{r}" for r in reasons) if reasons else "条件不一致"
     return {
         "title": f"⛔ 判定スキップ — {symbol}",
         "color": 15158332,
         "fields": [{
-            "name": "理由",
-            "value": reason,
+            "name": "Stage1 スキップ理由",
+            "value": reason_text,
             "inline": False
         }],
         "footer": {
-            "text": datetime.now(ZoneInfo("Asia/Tokyo")).strftime('%Y-%m-%d %H:%M:%S JST')
+            "text": datetime.now(ZoneInfo("Asia/Tokyo")).strftime("%Y-%m-%d %H:%M:%S JST")
         }
     }
 
@@ -100,24 +101,21 @@ def main():
     latest_df = pd.read_csv(args.latest_rates_file)
     row = latest_df[latest_df["symbol"] == args.symbol]
     if row.empty:
-        embed = create_skip_embed(args.symbol, "最新レートが取得できませんでした")
+        embed = create_skip_embed(args.symbol, ["最新レート取得失敗"])
         send_discord(embed, other_webhook)
         return
 
     latest_price = (row.iloc[0]["bid"] + row.iloc[0]["ask"]) / 2
 
-    # ===== Stage1 : テクニカル事前判定 =====
+    # ===== Stage1 =====
     tech_pre = analyze_tech(ai_input, args.symbol, args.asset_type, latest_price)
 
     if not tech_pre["llm_call_allowed"]:
-        embed = create_skip_embed(
-            args.symbol,
-            "Stage1 テクニカル条件により LLM 呼び出し不可"
-        )
+        embed = create_skip_embed(args.symbol, tech_pre.get("stage1_reasons", []))
         send_discord(embed, other_webhook)
         return
 
-    # ===== Stage2 : AI判定 =====
+    # ===== Stage2 =====
     ai_result = analyze_ai(
         ai_input,
         args.symbol,
@@ -127,10 +125,7 @@ def main():
     )
 
     if not ai_result:
-        embed = create_skip_embed(
-            args.symbol,
-            "AI分析結果が取得できませんでした"
-        )
+        embed = create_skip_embed(args.symbol, ["AI分析結果が取得できませんでした"])
         send_discord(embed, other_webhook)
         return
 
@@ -144,18 +139,14 @@ def main():
 
     embed = create_embed(args.symbol, ai_result, tech_post, latest_price)
 
-    # ===== ★ 履歴通知（必ず送る）★ =====
+    # ===== 履歴通知 =====
     send_discord(embed, other_webhook)
 
-    # ===== block は main に送らない =====
+    # ===== main通知条件 =====
     if tech_post["block"]:
         return
 
     prob = max(ai_result["up_probability"], ai_result["down_probability"])
-
-    if prob < 0.5:
-        return
-
     if prob >= 0.6:
         send_discord(embed, main_webhook)
 

@@ -11,6 +11,7 @@ def evaluate_technical_risk(timeframes, direction=None):
 
     warnings = []
     block = False
+    stage1_reasons = []
 
     # ===== 4h 最重要 =====
     tf_4h = timeframes.get("4h", {})
@@ -31,10 +32,14 @@ def evaluate_technical_risk(timeframes, direction=None):
 
     if "range" in phase_4h or phase_4h == "":
         llm_call_allowed = False
+        stage1_reasons.append("4hがレンジ、または相場判定不可")
 
-    if ("uptrend" in phase_15m and "downtrend" in phase_1h) or \
-       ("downtrend" in phase_15m and "uptrend" in phase_1h):
+    if (
+        ("uptrend" in phase_15m and "downtrend" in phase_1h) or
+        ("downtrend" in phase_15m and "uptrend" in phase_1h)
+    ):
         llm_call_allowed = False
+        stage1_reasons.append("15mと1hのトレンドが不一致")
 
     # ===== Stage2 : 拒否権（LLM後） =====
     if direction:
@@ -65,6 +70,7 @@ def evaluate_technical_risk(timeframes, direction=None):
 
     return {
         "llm_call_allowed": llm_call_allowed,
+        "stage1_reasons": stage1_reasons,
         "block": block,
         "warnings": warnings
     }
@@ -73,5 +79,4 @@ def evaluate_technical_risk(timeframes, direction=None):
 def analyze_ai_input(ai_input, symbol, asset_type, latest_price, llm_result=None):
     timeframes = ai_input.get("timeframes", {})
     direction = llm_result.get("direction") if llm_result else None
-
     return evaluate_technical_risk(timeframes, direction)
