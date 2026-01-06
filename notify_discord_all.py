@@ -147,7 +147,7 @@ def main():
         return
 
     prob = max(ai_result["up_probability"], ai_result["down_probability"])
-    if prob >= 0.6:
+    if prob >= 0.65:
         send_discord(embed, main_webhook)
 
 if __name__ == "__main__":
