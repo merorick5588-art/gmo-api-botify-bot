@@ -1,1 +1,7 @@
 symbol,type
+AUD_JPY,forex
+EUR_JPY,forex
+USD_JPY,forex
+GBP_JPY,forex
+AUD_USD,forex
+EUR_USD,forex
