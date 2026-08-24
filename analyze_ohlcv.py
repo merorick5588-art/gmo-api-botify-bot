@@ -1,151 +1,305 @@
 # analyze_ohlcv.py
 import os
 import json
+import math
 from openai import OpenAI
 
-def analyze_ai_input(ai_input, symbol, asset_type, latest_price, model_name="gpt-4o-mini"):
-    """
-    ai_input: dict (ai_input.json の内容)
-    symbol: "USD/JPY" など
-    asset_type: "forex" or "crypto"
-    latest_price: float, 最新価格
-    """
-    client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+from llm_config import (
+    DEFAULT_MODEL,
+    MARKET_REASONING_EFFORT,
+    market_max_output_tokens,
+    log_usage,
+)
 
-    # === データ抽出 ===
-    recent_ohlc = {
-        "15m": ai_input["timeframes"]["15m"]["recent_ohlc"],
-        "1h": ai_input["timeframes"]["1h"]["recent_ohlc"],
-        "4h": ai_input["timeframes"]["4h"]["recent_ohlc"]
+
+OCO_ITEM_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "risk": {"type": "string", "enum": ["Low", "Medium", "High"]},
+        "entry": {"type": "number"},
+        "stop_loss": {"type": "number"},
+        "take_profit": {"type": "number"},
+    },
+    "required": ["risk", "entry", "stop_loss", "take_profit"],
+    "additionalProperties": False,
+}
+
+MARKET_RESULT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "symbol": {"type": "string"},
+        "trend_score": {"type": "number", "minimum": -1, "maximum": 1},
+        "direction": {"type": "string", "enum": ["buy", "sell"]},
+        "ifd_oco": {
+            "type": "array",
+            "minItems": 3,
+            "maxItems": 3,
+            "items": OCO_ITEM_SCHEMA,
+        },
+    },
+    "required": ["symbol", "trend_score", "direction", "ifd_oco"],
+    "additionalProperties": False,
+}
+
+MARKET_BATCH_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "results": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 20,
+            "items": MARKET_RESULT_SCHEMA,
+        }
+    },
+    "required": ["results"],
+    "additionalProperties": False,
+}
+
+MARKET_ANALYST_INSTRUCTIONS = """短期FXテクニカル分析。入力だけを根拠に今後1〜4時間を評価する。
+各symbolは完全に独立して分析し、別symbolの値・方向・特徴を混ぜない。入力されたsymbolを各1件、漏れ・重複なく返す。
+trend_score=-1〜1（絶対値0.1〜0.3弱、0.4〜0.6明確、0.7〜1強）。正ならbuy、負ならsell。0付近はdominant_tfと1hを優先。
+dominant_tf順張りを基本に、時間足整合、RSI、MACD、ATR、価格位置、ボラティリティ、直近足を総合。外部情報は使わない。
+buyのentryはAsk基準でSL<Entry<TP、sellはBid基準でTP<Entry<SL。
+IFD-OCOはLow/Medium/High各1件。ATRとボラティリティに応じ、Low→Highの順にSL距離・TP距離を広げる。"""
+
+
+def _finite_number(value):
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        if not math.isfinite(float(value)):
+            return None
+        return float(f"{float(value):.7g}")
+    return value
+
+
+def _compact_value(value):
+    if isinstance(value, dict):
+        result = {}
+        for key, raw in value.items():
+            compacted = _compact_value(raw)
+            if compacted is not None:
+                result[key] = compacted
+        return result
+    if isinstance(value, list):
+        return [_compact_value(v) for v in value]
+    return _finite_number(value)
+
+
+def build_analysis_payload(ai_input, symbol, bid, ask):
+    """LLMに必要なFX情報だけを短いJSONに再構成する。"""
+    payload = {
+        "symbol": symbol,
+        "bid": bid,
+        "ask": ask,
+        "tf": {},
+        "rel": ai_input.get("timeframe_relationship"),
     }
-    features_summary = {
-        "15m": ai_input["timeframes"]["15m"]["features_summary"],
-        "1h": ai_input["timeframes"]["1h"]["features_summary"],
-        "4h": ai_input["timeframes"]["4h"]["features_summary"]
-    }
 
-    market_phase = {
-        "15m": ai_input["timeframes"]["15m"]["market_phase"],
-        "1h": ai_input["timeframes"]["1h"]["market_phase"],
-        "4h": ai_input["timeframes"]["4h"]["market_phase"]
-    }
+    for tf in ("15m", "1h", "4h"):
+        src = ai_input.get("timeframes", {}).get(tf)
+        if not src:
+            continue
 
-    timeframe_relationship = ai_input.get("timeframe_relationship")
+        payload["tf"][tf] = {
+            "phase": src.get("market_phase", {}).get("label"),
+            "tags": src.get("market_phase", {}).get("tags", []),
+            "ohlc": [
+                {k: v for k, v in candle.items() if k != "v"}
+                for candle in src.get("recent_ohlc", [])
+            ],
+            "feat": src.get("features_summary", {}),
+            "pos": src.get("price_context", {}),
+            "vol": src.get("volatility_state", {}),
+        }
 
-    # === 最新レート ===
-    bid = ai_input.get("latest_rate", {}).get("bid", latest_price)
-    ask = ai_input.get("latest_rate", {}).get("ask", latest_price)
+    return _compact_value(payload)
 
-    # === 資産タイプ別プロンプト ===
-    if asset_type == "forex":
-        scale_hint = "通常1日の変動は ±0.5〜1.5% 程度。金利動向・経済指標・地政学リスクの影響を受けやすい。"
-        strategy_context = """
-対象は外国為替（FX）です。
-・短期では経済指標（雇用統計、CPI、FOMC発言など）が方向性を左右する。
-・テクニカル指標（移動平均・RSI・MACD）とローソク足パターンを重視。
-・円高/円安、ドル高/ドル安などの通貨強弱を前提に判断せよ。
-"""
-    else:
-        scale_hint = "通常1日の変動は ±5〜10% 程度。ボラティリティが高く、BTC価格や投資家センチメントに影響されやすい。"
-        strategy_context = """
-対象は暗号資産（Crypto）です。
-・BTCやETHの価格連動、アルトコイン間の相関、ハッシュレートやETFニュースに注目。
-・テクニカル要因（ボラティリティ・出来高・RSI）を中心に分析。
-・短期トレンドを重視し、オーバーシュートを前提としたトレード戦略を考える。
-"""
 
-    # === プロンプト生成 ===
-    prompt = f"""
-あなたは世界トップレベルのFXトレーダー兼アナリストです。
-以下は {symbol} の最新データです。
-
-直近ローソク足（新しい順）:
-{json.dumps(recent_ohlc, ensure_ascii=False, indent=2)}
-
-特徴量サマリ:
-{json.dumps(features_summary, ensure_ascii=False, indent=2)}
-
-市場構造（事前計算済み・高信頼）:
-{json.dumps(market_phase, ensure_ascii=False, indent=2)}
-
-時間足の関係性:
-{json.dumps(timeframe_relationship, ensure_ascii=False, indent=2)}
-
-最新レート:
-Bid={bid}, Ask={ask}
-
-{strategy_context}
-
-参考変動レンジ: {scale_hint}
-
-タスク:
-1. 今後の1〜4時間の上昇・下落方向を -1〜1 (小数点第2位まで)で評価
-   - +1 = 強い上昇傾向
-   -  0 = 中立
-   - -1 = 強い下落傾向
-   目安:
-   ±0.1〜0.3 = 弱い傾き（様子見寄り）
-   ±0.4〜0.6 = 明確な方向性
-   ±0.7〜1.0 = 強いトレンド
-   この値を "trend_score" として出力。
-
-2. IFD-OCO注文案を3種類作成：
-   - "Low" = リスク低めの安全トレード
-   - "Medium" = 通常リスク
-   - "High" = ボラティリティを活かした攻めのトレード
-   - dominant timeframe の方向に沿った順張りを基本とする。
-   - trend_score>0 の場合はAskを基準にエントリー、<0 の場合はBidを基準にエントリー。
-   - stop_loss / take_profit は上記変動レンジを考慮。
-
-3. 出力は下記JSON形式で、コメントや説明文は一切含めない。
-
-出力形式(JSON):
-{{
-  "trend_score": float,
-  "direction": "buy" or "sell",
-  "ifd_oco": [
-    {{"risk": "Low", "entry": float, "stop_loss": float, "take_profit": float}},
-    {{"risk": "Medium", "entry": float, "stop_loss": float, "take_profit": float}},
-    {{"risk": "High", "entry": float, "stop_loss": float, "take_profit": float}}
-  ]
-}}
-"""
-
-    kwargs = {"model": model_name, "messages": [{"role": "user", "content": prompt}]}
-    if not model_name.startswith("gpt-5"):
-        kwargs["temperature"] = 0.7
-
-    response = client.chat.completions.create(**kwargs)
-    content = response.choices[0].message.content.strip()
-
+def _validate_result(result):
     try:
-        result = json.loads(content.strip("```json").strip("```").strip())
-    except json.JSONDecodeError:
-        print(f"AI出力のJSON変換に失敗しました:\n{content}")
-        return None
+        score = float(result.get("trend_score", 0))
+        direction = result.get("direction")
+        oco = result.get("ifd_oco", [])
 
-    # === trend_scoreから確率換算 ===
-    score = result.get("trend_score", 0)
+        if direction not in {"buy", "sell"} or len(oco) != 3:
+            return False
+        if score > 0 and direction != "buy":
+            return False
+        if score < 0 and direction != "sell":
+            return False
+        if {x.get("risk") for x in oco} != {"Low", "Medium", "High"}:
+            return False
+
+        sl_distances = []
+        tp_distances = []
+        by_risk = {item["risk"]: item for item in oco}
+        for risk in ("Low", "Medium", "High"):
+            item = by_risk[risk]
+            entry = float(item["entry"])
+            sl = float(item["stop_loss"])
+            tp = float(item["take_profit"])
+            if direction == "buy" and not (sl < entry < tp):
+                return False
+            if direction == "sell" and not (tp < entry < sl):
+                return False
+            sl_distances.append(abs(entry - sl))
+            tp_distances.append(abs(tp - entry))
+
+        if sl_distances != sorted(sl_distances) or tp_distances != sorted(tp_distances):
+            return False
+        return True
+    except (TypeError, ValueError, KeyError):
+        return False
+
+
+def _normalize_result(result):
+    score = max(-1.0, min(1.0, float(result.get("trend_score", 0))))
+    result["trend_score"] = score
+    result["signal_strength"] = abs(score)
+    risk_order = {"Low": 0, "Medium": 1, "High": 2}
+    result["ifd_oco"].sort(key=lambda x: risk_order[x["risk"]])
+
+    # 旧通知コードとの互換用。確率ではなく方向スコア由来。
     result["up_probability"] = max(score, 0)
     result["down_probability"] = abs(min(score, 0))
-
     return result
 
 
-# テスト用実行
+def _request_batch(items, model_name=DEFAULT_MODEL):
+    """指定された銘柄群を1回のResponses APIで分析する内部関数。"""
+    if not items:
+        return {}
+
+    expected_symbols = [item["symbol"] for item in items]
+    if len(set(expected_symbols)) != len(expected_symbols):
+        raise ValueError("batch items contain duplicate symbols")
+
+    markets = [
+        build_analysis_payload(
+            item["ai_input"],
+            item["symbol"],
+            float(item["bid"]),
+            float(item["ask"]),
+        )
+        for item in items
+    ]
+    compact_input = json.dumps({"markets": markets}, ensure_ascii=False, separators=(",", ":"))
+
+    client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+    try:
+        response = client.responses.create(
+            model=model_name,
+            instructions=MARKET_ANALYST_INSTRUCTIONS,
+            input=compact_input,
+            reasoning={"effort": MARKET_REASONING_EFFORT},
+            text={
+                "verbosity": "low",
+                "format": {
+                    "type": "json_schema",
+                    "name": "fx_market_batch_analysis",
+                    "strict": True,
+                    "schema": MARKET_BATCH_SCHEMA,
+                },
+            },
+            max_output_tokens=market_max_output_tokens(len(items)),
+            store=False,
+        )
+        log_usage(response, f"market-batch:{len(items)}")
+        parsed = json.loads(response.output_text)
+    except Exception as exc:
+        print(f"OpenAI一括分析に失敗しました: {exc}")
+        return {}
+
+    results = parsed.get("results", [])
+    by_symbol = {}
+    for result in results:
+        symbol = result.get("symbol")
+        if symbol not in expected_symbols or symbol in by_symbol:
+            print(f"AI出力に不正なsymbolがあります: {symbol}")
+            return {}
+        if not _validate_result(result):
+            print(f"AI出力の整合性チェックに失敗しました ({symbol}): {result}")
+            return {}
+        by_symbol[symbol] = _normalize_result(result)
+
+    if set(by_symbol) != set(expected_symbols):
+        missing = sorted(set(expected_symbols) - set(by_symbol))
+        print(f"AI一括分析で銘柄が欠落しました: {missing}")
+        return {}
+
+    return by_symbol
+
+
+def analyze_ai_inputs_batch(items, model_name=DEFAULT_MODEL):
+    """
+    Stage1通過済みの複数FX銘柄を原則1回のResponses APIで独立分析する。
+    バッチ応答が不正な場合だけ、信頼性優先で単銘柄呼び出しへフォールバックする。
+    """
+    if not items:
+        return {}
+
+    results = _request_batch(items, model_name=model_name)
+    if results or len(items) == 1:
+        return results
+
+    print("一括分析が不正だったため、単銘柄分析へフォールバックします。")
+    recovered = {}
+    for item in items:
+        single = _request_batch([item], model_name=model_name)
+        if item["symbol"] in single:
+            recovered[item["symbol"]] = single[item["symbol"]]
+    return recovered
+
+
+def analyze_ai_input(
+    ai_input,
+    symbol,
+    latest_price=None,
+    model_name=DEFAULT_MODEL,
+    latest_bid=None,
+    latest_ask=None,
+):
+    """単一銘柄用の互換ラッパー。内部ではバッチAPIを1件で使用する。"""
+    fallback_bid = ai_input.get("latest_rate", {}).get("bid", latest_price)
+    fallback_ask = ai_input.get("latest_rate", {}).get("ask", latest_price)
+    if latest_bid is None:
+        latest_bid = fallback_bid
+    if latest_ask is None:
+        latest_ask = fallback_ask
+    if latest_bid is None or latest_ask is None:
+        raise ValueError("bid/ask is required")
+
+    results = analyze_ai_inputs_batch([
+        {
+            "symbol": symbol,
+            "ai_input": ai_input,
+            "bid": float(latest_bid),
+            "ask": float(latest_ask),
+        }
+    ], model_name=model_name)
+    return results.get(symbol)
+
+
 if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser()
     parser.add_argument("ai_input_file", type=str)
     parser.add_argument("--symbol", type=str, required=True)
-    parser.add_argument("--asset_type", type=str, required=True)
-    parser.add_argument("--latest_price", type=float, default=None)
-    parser.add_argument("--model", type=str, default="gpt-4o-mini")
+    parser.add_argument("--latest_bid", type=float, required=True)
+    parser.add_argument("--latest_ask", type=float, required=True)
+    parser.add_argument("--model", type=str, default=DEFAULT_MODEL)
     args = parser.parse_args()
 
     with open(args.ai_input_file, "r", encoding="utf-8") as f:
         ai_input = json.load(f)
 
-    result = analyze_ai_input(ai_input, args.symbol, args.asset_type, args.latest_price or 150.0, args.model)
+    result = analyze_ai_input(
+        ai_input,
+        args.symbol,
+        model_name=args.model,
+        latest_bid=args.latest_bid,
+        latest_ask=args.latest_ask,
+    )
     print(json.dumps(result, indent=2, ensure_ascii=False))
