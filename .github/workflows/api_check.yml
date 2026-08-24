@@ -1,10 +1,10 @@
-name: GMO API Data Pipeline
+name: GMO FX Data Pipeline
 
 on:
-  workflow_dispatch:  # 手動実行のみ
+  workflow_dispatch:
 
 concurrency:
-  group: gmo-data-pipeline
+  group: gmo-fx-data-pipeline
   cancel-in-progress: true
 
 jobs:
@@ -15,62 +15,39 @@ jobs:
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       DISCORD_FOREX_MAIN: ${{ secrets.DISCORD_FOREX_MAIN }}
       DISCORD_FOREX_OTHER: ${{ secrets.DISCORD_FOREX_OTHER }}
-      DISCORD_CRYPTO_MAIN: ${{ secrets.DISCORD_CRYPTO_MAIN }}
-      DISCORD_CRYPTO_OTHER: ${{ secrets.DISCORD_CRYPTO_OTHER }}
+      OPENAI_MODEL: gpt-5.6-luna
+      OPENAI_MARKET_REASONING_EFFORT: low
+      OPENAI_BATCH_ANALYSIS: "true"
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
-          python-version: 3.11
+          python-version: '3.11'
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pandas requests openai beautifulsoup4 feedparser
+          pip install pandas requests "openai==3.2.0"
 
-      - name: Run pipeline for each symbol
+      - name: Run FX pipeline
+        shell: bash
         run: |
+          set -euo pipefail
+
           weekday_jst=$(TZ=Asia/Tokyo date +%u)
-          hour_jst=$(TZ=Asia/Tokyo date +%H)
+          if [[ "$weekday_jst" -gt 5 ]]; then
+            echo "FX weekend: pipeline skipped."
+            exit 0
+          fi
 
-          # ヘッダ行を除いて1行ずつ処理
-          tail -n +2 symbols.csv | while IFS=',' read -r symbol type; do
-            echo "=== Processing $symbol ($type) ==="
+          # データ処理は全銘柄を一括実行。
+          python fetch_gmo_ohlcv.py symbols.csv
+          python ohlcv_calc.py symbols.csv
+          python prepare_features.py symbols.csv
 
-            # === FXは週末スキップ ===
-            if [ "$type" = "forex" ] && [[ "$weekday_jst" -gt 5 ]]; then
-              echo "Skipping $symbol (FX weekend)"
-              continue
-            fi
-
-            # === symbol_target.csv 作成 ===
-            echo "symbol,type" > symbol_target.csv
-            echo "$symbol,$type" >> symbol_target.csv
-
-            # === 各処理 ===
-            python fetch_gmo_ohlcv.py symbol_target.csv
-            python ohlcv_calc.py symbol_target.csv
-            python prepare_features.py symbol_target.csv
-
-            # === AI分析 & 通知 ===
-            ai_input_file="${symbol}_ai_input.json"
-            latest_rates_file="${symbol}_latest_rates.csv"
-
-            if [ -f "$ai_input_file" ] && [ -f "$latest_rates_file" ]; then
-              python notify_discord_all.py \
-                --ai_input_file "$ai_input_file" \
-                --latest_rates_file "$latest_rates_file" \
-                --symbol "$symbol" \
-                --asset_type "$type" \
-                --model gpt-5-mini
-            else
-              echo "Missing files for $symbol"
-            fi
-
-            echo "=== Finished $symbol ==="
-            echo
-          done
+          # Stage1を全銘柄に適用後、通過銘柄だけを1回のOpenAI APIで一括分析。
+          python notify_discord_all.py --symbols_file symbols.csv
