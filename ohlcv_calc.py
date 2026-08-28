@@ -72,6 +72,8 @@ def add_features(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
     out["SMA_20"] = out["Close"].rolling(window=20).mean()
     out["SMA_50"] = out["Close"].rolling(window=50).mean()
+    out["SMA_100"] = out["Close"].rolling(window=100).mean()
+    out["SMA_200"] = out["Close"].rolling(window=200).mean()
     out["RSI_14"] = compute_rsi(out["Close"], 14)
     out["MACD"], out["MACD_signal"] = compute_macd(out["Close"])
     out["ATR_14"] = compute_atr(out, 14)
@@ -99,7 +101,7 @@ def process_csv(file_path: str):
 def main(symbols_csv: str):
     for symbol in load_symbols(symbols_csv):
         print(f"\n=== Processing {symbol} ===")
-        for interval in ("15min", "1hour", "4hour"):
+        for interval in ("15min", "1hour", "4hour", "1day"):
             process_csv(f"{symbol}_{interval}_forex.csv")
 
 

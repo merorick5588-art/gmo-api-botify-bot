@@ -80,13 +80,13 @@ MGMT_BATCH_SCHEMA = {
 }
 
 ENTRY_INSTRUCTIONS = f"""目的: 入力されたテクニカルだけを使い、各FX銘柄の今後4〜12時間の方向を予測し、デイトレ〜短期スイング向けの注文案を1つだけ返す。外部情報は禁止。
-時間軸: 4h=大局とトレンド仮説、1h=予測の主軸とセットアップ、15m=約定タイミング。各symbolは完全に独立分析し、漏れ・重複なく返す。
+時間軸: 1d=長期背景（売買トリガーではなく追い風/逆風）、4h=大局とトレンド仮説、1h=予測の主軸とセットアップ、15m=約定タイミング。各symbolは完全に独立分析し、漏れ・重複なく返す。
 凡例: tf.*.f の reg=レジーム,rsi=RSI14,adx=ADX14,pdi/mdi=DI,s20/s50=現在値のSMA20/50からのATR距離,
 macd=MACD/ATR,mh=MACDヒストグラム/ATR,sl20/sl50=SMA20/50の5本変化÷ATR,atrp=ATR%,vr=直近/100本ボラ比,
-h20/l20=現在値から20本高値/安値までのATR距離,ret20=平均20リターン%,up20=20本上昇比,last=直近リターン%,atr=ATR14。cは古い→新しい[O,H,L,C]。
+h20/l20=現在値から20本高値/安値までのATR距離,ret20=平均20リターン%,up20=20本上昇比,last=直近リターン%,atr=ATR14。全時間足でh100/l100=100本高安距離ATR比,atrq=ATR%の過去最大250本内分位(0低〜1高),er50=50本トレンド効率(0往復〜1直線),p50=直近50本でClose>SMA50の比率。1h/4h/1dではさらにs100/s200=SMA100/200乖離ATR比,sl100/sl200=10本SMA傾きATR比,h250/l250=250本高安距離ATR比。cは古い→新しい[O,H,L,C]。
 trend_scoreは現状の説明ではなく「4〜12時間先の方向予測」と確信度。-1=強い下落予測、+1=強い上昇予測。根拠が拮抗するなら0へ寄せ、無理に強い値を付けない。
 entry_qualityは方向予測とは別に「提案するentry_planとentry価格で注文する質」。現在値を追う必要はなく、高値追い/安値追い、直近20本の反対側余地不足、15m過熱、高ボラは減点する。15m逆行が4h/1h順張りの健全な押し目/戻りなら、その待ち注文のqualityを高くしてよい。
-分析では4hのreg/ADX/DI/SMA傾き→1hの継続性→15mのタイミングの順に確認し、内部で上昇ケースと下落ケースを比較してから一方向を選ぶ。さらに、その方向について「現在値付近で入る」「押し目/戻りをLIMITで待つ」「ブレイクをSTOPで待つ」の3案を内部比較し、期待値が最も高い1案だけをentry_planにする。
+分析では1dの長期背景を確認したうえで、4hのreg/ADX/DI/SMA20〜200/長期高安/atrq/er50→1hの継続性→15mのタイミングの順に確認し、内部で上昇ケースと下落ケースを比較してから一方向を選ぶ。1dが4hと逆でも機械的に禁止せず、長期逆風としてtrend_scoreやentry_qualityを抑える。さらに、その方向について「現在値付近で入る」「押し目/戻りをLIMITで待つ」「ブレイクをSTOPで待つ」の3案を内部比較し、期待値が最も高い1案だけをentry_planにする。
 entry_planはENTER_NOW / PULLBACK_LIMIT / BREAKOUT_STOP。PULLBACK_LIMITはBUYならAskより下の押し目買い、SELLならBidより上の戻り売り。BREAKOUT_STOPはBUYならAskより上の上抜け、SELLならBidより下の下抜け。押し目/戻りを待つ方が現在値追随より良いなら、必ずPULLBACK_LIMITを選ぶ。
 entryはentry_planで実際に約定を狙う価格。4〜12時間内に合理的に約定し得る1価格にする。
 trend_invalidationは単なる狭い損切り幅ではなく、その価格まで逆行すれば1h/4hの予測前提が崩れたと判断できる逆指値水準。主に1h/4hの構造、20本高安、SMA、ATRから置き、RRを良く見せるためだけに不自然に近づけない。
@@ -95,7 +95,7 @@ BUYはtrend_invalidation < entry < take_profit、SELLはtake_profit < entry < tr
 
 MGMT_INSTRUCTIONS = """FXデイトレ〜短期スイングの既存建玉/未約定注文を、今後4〜12時間の市場構造を基準に管理する。外部情報は禁止、入力だけを使う。
 目的は年間期待値とドローダウン管理。ctx.prev_actionと現在構造を比較し、有意な変化がなければHOLD/KEEP_ORDERを優先する。含み損を理由に逆指値を損失側へ広げない。ctx.eventsに重要指標が近ければ急変リスクも考慮する。
-4h=大局とトレンド仮説、1h=管理判断の主軸、15m=短期変化。
+1d=長期背景、4h=大局とトレンド仮説、1h=管理判断の主軸、15m=短期変化。日足逆行だけで即CLOSEせず、4h/1hの崩れと合わせて判断する。
 position: HOLD/CLOSE/TAKE_PARTIAL/TIGHTEN_SL/REVIEW_MANUALLY。トレンドがまだ有効ならtrend_invalidationに「ここを抜けたら保有前提が崩れる価格」を返す。CLOSE/REVIEW_MANUALLYで有効な水準を定義できない場合はnull可。TIGHTEN_SLではこの水準を実際の提案逆指値として扱う。
 order: KEEP_ORDER/CANCEL_ORDER/REPRICE_ORDER/REVIEW_MANUALLY。未約定注文がまだ有効ならrecommended_order_priceに「現在の構造から最も合理的に約定を狙う価格」を必ず返す。KEEP_ORDERでも現在注文価格が妥当か比較できるよう数値を返す。CANCEL_ORDER/REVIEW_MANUALLYで新規約定自体を推奨しない場合のみnull可。
 注文価格はorders内のOPEN注文のside/type/priceと現在Bid/Askを踏まえ、LIMITなら押し目/戻り、STOPならブレイク水準として考える。注文種別を暗黙に逆転させる価格は出さない。

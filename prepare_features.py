@@ -9,7 +9,7 @@ import pandas as pd
 
 from symbol_config import load_symbols
 
-TIMEFRAMES = {"15m": "15min", "1h": "1hour", "4h": "4hour"}
+TIMEFRAMES = {"15m": "15min", "1h": "1hour", "4h": "4hour", "1d": "1day"}
 
 
 def _safe(value, default=0.0):
@@ -44,7 +44,7 @@ def derive_regime(df: pd.DataFrame) -> str:
     return "TRANSITION"
 
 
-def summarize(df: pd.DataFrame) -> dict:
+def summarize(df: pd.DataFrame, timeframe: str | None = None) -> dict:
     last = df.iloc[-1]
     close = _safe(last["Close"])
     atr = max(_safe(last["ATR_14"]), 1e-9)
@@ -63,7 +63,7 @@ def summarize(df: pd.DataFrame) -> dict:
     base_std = _safe(total_ret.tail(100).std(), recent_std or 1e-9)
 
     # 絶対値より価格桁に依存しにくい正規化特徴を優先する。
-    return {
+    result = {
         "reg": derive_regime(df),
         "rsi": round(_safe(last["RSI_14"], 50), 2),
         "adx": round(_safe(last.get("ADX_14")), 2),
@@ -85,6 +85,53 @@ def summarize(df: pd.DataFrame) -> dict:
         "atr": round(atr, 7),
     }
 
+    # 320本履歴を古いローソク足の羅列ではなく、長期文脈へ圧縮する。
+    # 15mでも「現在が過去数日比で高ボラか」「直線的か往復か」はEntry timingに有用。
+    if len(df) >= 200:
+        r100 = df.tail(100)
+        h100 = _safe(r100["High"].max(), close)
+        l100 = _safe(r100["Low"].min(), close)
+
+        atr_pct_series = (pd.to_numeric(df["ATR_14"], errors="coerce") / df["Close"].replace(0, pd.NA) * 100).dropna().tail(250)
+        atrp_now = atr / close * 100 if close else 0.0
+        atr_quantile = _safe((atr_pct_series <= atrp_now).mean(), 0.5) if not atr_pct_series.empty else 0.5
+
+        close50 = pd.to_numeric(df["Close"], errors="coerce").tail(51).dropna()
+        if len(close50) >= 2:
+            net = abs(float(close50.iloc[-1] - close50.iloc[0]))
+            path = float(close50.diff().abs().sum())
+            er50 = net / path if path > 0 else 0.0
+        else:
+            er50 = 0.0
+        tail50 = df.tail(50)
+        above50 = _safe((tail50["Close"] > tail50["SMA_50"]).mean(), 0.5)
+        result.update({
+            "h100": round((h100 - close) / atr, 3),
+            "l100": round((close - l100) / atr, 3),
+            "atrq": round(atr_quantile, 3),
+            "er50": round(er50, 3),
+            "p50": round(above50, 3),
+        })
+
+    # 1h/4h/日足ではさらにSMA100/200と250本構造を使う。
+    if timeframe in {"1h", "4h", "1d"} and len(df) >= 250:
+        sma100 = _safe(last.get("SMA_100"), close)
+        sma200 = _safe(last.get("SMA_200"), close)
+        sma100_prev = _safe(df["SMA_100"].iloc[-11], sma100) if len(df) >= 11 else sma100
+        sma200_prev = _safe(df["SMA_200"].iloc[-11], sma200) if len(df) >= 11 else sma200
+        r250 = df.tail(250)
+        h250 = _safe(r250["High"].max(), close)
+        l250 = _safe(r250["Low"].min(), close)
+        result.update({
+            "s100": round((close - sma100) / atr, 3),
+            "s200": round((close - sma200) / atr, 3),
+            "sl100": round((sma100 - sma100_prev) / atr, 3),
+            "sl200": round((sma200 - sma200_prev) / atr, 3),
+            "h250": round((h250 - close) / atr, 3),
+            "l250": round((close - l250) / atr, 3),
+        })
+    return result
+
 
 def recent_ohlc(df: pd.DataFrame) -> list[list[float]]:
     # [O,H,L,C]、古い→新しい。モデルには凡例を明示する。
@@ -105,10 +152,10 @@ def prepare_ai_input(symbols_csv: str):
                 complete = False
                 break
             df = pd.read_csv(path)
-            if len(df) < 60:
+            if len(df) < 260:
                 complete = False
                 break
-            result["tf"][label] = {"f": summarize(df), "c": recent_ohlc(df)}
+            result["tf"][label] = {"f": summarize(df, label), "c": recent_ohlc(df)}
         if not complete:
             print(f"Skip AI input {symbol}: timeframe不足")
             continue

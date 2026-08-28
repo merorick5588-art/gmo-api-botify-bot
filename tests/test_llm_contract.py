@@ -68,6 +68,8 @@ class LLMContractTests(unittest.TestCase):
         self.assertTrue(kwargs["text"]["format"]["strict"])
         self.assertFalse(kwargs["store"])
         self.assertIn("4〜12時間", kwargs["instructions"])
+        self.assertIn("1d=長期背景", kwargs["instructions"])
+        self.assertIn("s100/s200", kwargs["instructions"])
         props = kwargs["text"]["format"]["schema"]["properties"]["results"]["items"]["properties"]
         self.assertIn("trend_invalidation", props)
         self.assertIn("entry_plan", props)

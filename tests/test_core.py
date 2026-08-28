@@ -15,7 +15,7 @@ import pandas as pd
 from analyze_technical import stage1_filter
 from economic_calendar import _parse_event, event_guard_for_symbol, fetch_calendar
 from ohlcv_calc import add_features, compute_atr, compute_rsi
-from prepare_features import derive_regime, recent_ohlc
+from prepare_features import TIMEFRAMES, derive_regime, recent_ohlc, summarize
 from risk_engine import calculate_size, quote_to_jpy_rate, total_risk_ok, margin_ok
 from state_db import StateDB
 from notify_discord_all import _send_dedup, _entry_plan_label, _management_requires_main
@@ -53,6 +53,33 @@ class CoreTests(unittest.TestCase):
         rows = recent_ohlc(df)
         self.assertEqual(rows[0][0], 2)
         self.assertEqual(rows[-1][0], 5)
+
+
+    def test_long_history_features_are_meaningful_and_daily_enabled(self):
+        n = 320
+        # 単調すぎない上昇系列でSMA200/長期構造を計算できることを確認。
+        x = np.arange(n, dtype=float)
+        close = 100 + x * 0.03 + np.sin(x / 7.0) * 0.25
+        df = pd.DataFrame({
+            "Open": close - 0.03, "High": close + 0.12,
+            "Low": close - 0.12, "Close": close, "Volume": 0,
+        })
+        feat = add_features(df)
+        self.assertTrue(np.isfinite(float(feat["SMA_200"].iloc[-1])))
+        f4 = summarize(feat, "4h")
+        for key in ("s100", "s200", "sl100", "sl200", "h250", "l250", "atrq", "er50", "p50"):
+            self.assertIn(key, f4)
+        self.assertGreaterEqual(f4["atrq"], 0.0)
+        self.assertLessEqual(f4["atrq"], 1.0)
+        self.assertGreaterEqual(f4["er50"], 0.0)
+        self.assertLessEqual(f4["er50"], 1.0)
+        # 15mにも長期ボラ/トレンド効率は使うが、SMA200文脈は上位足だけ。
+        f15 = summarize(feat, "15m")
+        self.assertIn("atrq", f15)
+        self.assertIn("er50", f15)
+        self.assertIn("h100", f15)
+        self.assertNotIn("s200", f15)
+        self.assertEqual(TIMEFRAMES["1d"], "1day")
 
     def test_stage1_allows_15m_pullback(self):
         ai = {"tf": {

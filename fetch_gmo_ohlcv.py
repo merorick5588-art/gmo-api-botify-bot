@@ -13,7 +13,7 @@ from gmo_client import GMOClient, parse_api_timestamp
 from symbol_config import load_symbols
 
 JST = ZoneInfo("Asia/Tokyo")
-INTERVAL_MINUTES = {"15min": 15, "1hour": 60, "4hour": 240}
+INTERVAL_MINUTES = {"15min": 15, "1hour": 60, "4hour": 240, "1day": 1440}
 
 
 def _remove_old_outputs(symbol: str) -> None:
@@ -21,9 +21,11 @@ def _remove_old_outputs(symbol: str) -> None:
         "15min_forex.csv",
         "1hour_forex.csv",
         "4hour_forex.csv",
+        "1day_forex.csv",
         "15min_forex_features.csv",
         "1hour_forex_features.csv",
         "4hour_forex_features.csv",
+        "1day_forex_features.csv",
         "ai_input.json",
         "latest_rates.csv",
     ):
@@ -61,8 +63,8 @@ def _rows_to_df(rows: list[dict], interval: str, now: datetime) -> pd.DataFrame:
 
 def fetch_ohlcv(client: GMOClient, symbol: str, interval: str, now: datetime) -> pd.DataFrame:
     chunks: list[pd.DataFrame] = []
-    if interval == "4hour":
-        # 4hは年単位。通常は当年のみで十分だが、年初は前年へ遡る。
+    if interval in {"4hour", "1day"}:
+        # 4h/日足は年単位。長期特徴量用に必要本数まで前年へ遡る。
         for year in (now.year, now.year - 1):
             try:
                 rows = client.klines(symbol, interval, str(year), "BID")
@@ -130,9 +132,9 @@ def main(csv_file: str):
 
     for symbol in symbols:
         print(f"\n=== Fetching {symbol} ===")
-        for interval in ("15min", "1hour", "4hour"):
+        for interval in ("15min", "1hour", "4hour", "1day"):
             df = fetch_ohlcv(client, symbol, interval, now)
-            if len(df) < 60:
+            if len(df) < 260:
                 print(f"Insufficient data for {symbol} {interval}: {len(df)} bars")
                 continue
             out_name = f"{symbol}_{interval}_forex.csv"

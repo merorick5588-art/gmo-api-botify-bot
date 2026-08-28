@@ -17,7 +17,11 @@ class GitHubActionsTests(unittest.TestCase):
 
     def test_workflow_persists_state_on_github_hosted_runner(self):
         text = Path('.github/workflows/api_check.yml').read_text(encoding='utf-8')
-        self.assertIn('uses: actions/cache@v4', text)
+        self.assertIn('uses: actions/cache@v5', text)
+        self.assertIn('uses: actions/setup-python@v7', text)
+        self.assertIn('uses: actions/checkout@v6', text)
+        self.assertNotIn('actions/cache@v4', text)
+        self.assertNotIn('actions/setup-python@v5', text)
         self.assertIn('path: state', text)
         self.assertIn('BOT_STATE_DB: state/fxbot.sqlite3', text)
 
