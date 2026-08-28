@@ -1,305 +1,376 @@
-# analyze_ohlcv.py
-import os
+from __future__ import annotations
+
 import json
 import math
+import os
+from typing import Any
+
 from openai import OpenAI
 
+from bot_config import MIN_RR
 from llm_config import (
     DEFAULT_MODEL,
+    BATCH_ANALYSIS_ENABLED,
+    BATCH_MAX_SYMBOLS,
+    MANAGEMENT_REASONING_EFFORT,
     MARKET_REASONING_EFFORT,
-    market_max_output_tokens,
     log_usage,
+    management_max_output_tokens,
+    market_max_output_tokens,
 )
 
-
-OCO_ITEM_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "risk": {"type": "string", "enum": ["Low", "Medium", "High"]},
-        "entry": {"type": "number"},
-        "stop_loss": {"type": "number"},
-        "take_profit": {"type": "number"},
-    },
-    "required": ["risk", "entry", "stop_loss", "take_profit"],
-    "additionalProperties": False,
-}
-
-MARKET_RESULT_SCHEMA = {
+ENTRY_RESULT_SCHEMA = {
     "type": "object",
     "properties": {
         "symbol": {"type": "string"},
         "trend_score": {"type": "number", "minimum": -1, "maximum": 1},
-        "direction": {"type": "string", "enum": ["buy", "sell"]},
-        "ifd_oco": {
-            "type": "array",
-            "minItems": 3,
-            "maxItems": 3,
-            "items": OCO_ITEM_SCHEMA,
-        },
+        "entry_quality": {"type": "number", "minimum": 0, "maximum": 1},
+        "entry_plan": {"type": "string", "enum": ["ENTER_NOW", "PULLBACK_LIMIT", "BREAKOUT_STOP"]},
+        "entry": {"type": "number"},
+        "trend_invalidation": {"type": "number"},
+        "take_profit": {"type": "number"},
+        "reason": {"type": "string"},
     },
-    "required": ["symbol", "trend_score", "direction", "ifd_oco"],
+    "required": [
+        "symbol", "trend_score", "entry_quality", "entry_plan", "entry",
+        "trend_invalidation", "take_profit", "reason",
+    ],
     "additionalProperties": False,
 }
-
-MARKET_BATCH_SCHEMA = {
+ENTRY_BATCH_SCHEMA = {
     "type": "object",
     "properties": {
-        "results": {
-            "type": "array",
-            "minItems": 1,
-            "maxItems": 20,
-            "items": MARKET_RESULT_SCHEMA,
-        }
+        "results": {"type": "array", "minItems": 1, "maxItems": 30, "items": ENTRY_RESULT_SCHEMA}
     },
     "required": ["results"],
     "additionalProperties": False,
 }
 
-MARKET_ANALYST_INSTRUCTIONS = """短期FXテクニカル分析。入力だけを根拠に今後1〜4時間を評価する。
-各symbolは完全に独立して分析し、別symbolの値・方向・特徴を混ぜない。入力されたsymbolを各1件、漏れ・重複なく返す。
-trend_score=-1〜1（絶対値0.1〜0.3弱、0.4〜0.6明確、0.7〜1強）。正ならbuy、負ならsell。0付近はdominant_tfと1hを優先。
-dominant_tf順張りを基本に、時間足整合、RSI、MACD、ATR、価格位置、ボラティリティ、直近足を総合。外部情報は使わない。
-buyのentryはAsk基準でSL<Entry<TP、sellはBid基準でTP<Entry<SL。
-IFD-OCOはLow/Medium/High各1件。ATRとボラティリティに応じ、Low→Highの順にSL距離・TP距離を広げる。"""
-
-
-def _finite_number(value):
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        if not math.isfinite(float(value)):
-            return None
-        return float(f"{float(value):.7g}")
-    return value
-
-
-def _compact_value(value):
-    if isinstance(value, dict):
-        result = {}
-        for key, raw in value.items():
-            compacted = _compact_value(raw)
-            if compacted is not None:
-                result[key] = compacted
-        return result
-    if isinstance(value, list):
-        return [_compact_value(v) for v in value]
-    return _finite_number(value)
-
-
-def build_analysis_payload(ai_input, symbol, bid, ask):
-    """LLMに必要なFX情報だけを短いJSONに再構成する。"""
-    payload = {
-        "symbol": symbol,
-        "bid": bid,
-        "ask": ask,
-        "tf": {},
-        "rel": ai_input.get("timeframe_relationship"),
-    }
-
-    for tf in ("15m", "1h", "4h"):
-        src = ai_input.get("timeframes", {}).get(tf)
-        if not src:
-            continue
-
-        payload["tf"][tf] = {
-            "phase": src.get("market_phase", {}).get("label"),
-            "tags": src.get("market_phase", {}).get("tags", []),
-            "ohlc": [
-                {k: v for k, v in candle.items() if k != "v"}
-                for candle in src.get("recent_ohlc", [])
+NULL_NUMBER = {"anyOf": [{"type": "number"}, {"type": "null"}]}
+MGMT_RESULT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "symbol": {"type": "string"},
+        "action": {
+            "type": "string",
+            "enum": [
+                "HOLD", "CLOSE", "TAKE_PARTIAL", "TIGHTEN_SL",
+                "KEEP_ORDER", "CANCEL_ORDER", "REPRICE_ORDER", "REVIEW_MANUALLY",
             ],
-            "feat": src.get("features_summary", {}),
-            "pos": src.get("price_context", {}),
-            "vol": src.get("volatility_state", {}),
-        }
+        },
+        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+        "trend_invalidation": NULL_NUMBER,
+        "recommended_order_price": NULL_NUMBER,
+        "take_partial_pct": NULL_NUMBER,
+        "reason": {"type": "string"},
+    },
+    "required": [
+        "symbol", "action", "confidence", "trend_invalidation",
+        "recommended_order_price", "take_partial_pct", "reason",
+    ],
+    "additionalProperties": False,
+}
+MGMT_BATCH_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "results": {"type": "array", "minItems": 1, "maxItems": 30, "items": MGMT_RESULT_SCHEMA}
+    },
+    "required": ["results"],
+    "additionalProperties": False,
+}
 
-    return _compact_value(payload)
+ENTRY_INSTRUCTIONS = f"""目的: 入力されたテクニカルだけを使い、各FX銘柄の今後4〜12時間の方向を予測し、デイトレ〜短期スイング向けの注文案を1つだけ返す。外部情報は禁止。
+時間軸: 4h=大局とトレンド仮説、1h=予測の主軸とセットアップ、15m=約定タイミング。各symbolは完全に独立分析し、漏れ・重複なく返す。
+凡例: tf.*.f の reg=レジーム,rsi=RSI14,adx=ADX14,pdi/mdi=DI,s20/s50=現在値のSMA20/50からのATR距離,
+macd=MACD/ATR,mh=MACDヒストグラム/ATR,sl20/sl50=SMA20/50の5本変化÷ATR,atrp=ATR%,vr=直近/100本ボラ比,
+h20/l20=現在値から20本高値/安値までのATR距離,ret20=平均20リターン%,up20=20本上昇比,last=直近リターン%,atr=ATR14。cは古い→新しい[O,H,L,C]。
+trend_scoreは現状の説明ではなく「4〜12時間先の方向予測」と確信度。-1=強い下落予測、+1=強い上昇予測。根拠が拮抗するなら0へ寄せ、無理に強い値を付けない。
+entry_qualityは方向予測とは別に「提案するentry_planとentry価格で注文する質」。現在値を追う必要はなく、高値追い/安値追い、直近20本の反対側余地不足、15m過熱、高ボラは減点する。15m逆行が4h/1h順張りの健全な押し目/戻りなら、その待ち注文のqualityを高くしてよい。
+分析では4hのreg/ADX/DI/SMA傾き→1hの継続性→15mのタイミングの順に確認し、内部で上昇ケースと下落ケースを比較してから一方向を選ぶ。さらに、その方向について「現在値付近で入る」「押し目/戻りをLIMITで待つ」「ブレイクをSTOPで待つ」の3案を内部比較し、期待値が最も高い1案だけをentry_planにする。
+entry_planはENTER_NOW / PULLBACK_LIMIT / BREAKOUT_STOP。PULLBACK_LIMITはBUYならAskより下の押し目買い、SELLならBidより上の戻り売り。BREAKOUT_STOPはBUYならAskより上の上抜け、SELLならBidより下の下抜け。押し目/戻りを待つ方が現在値追随より良いなら、必ずPULLBACK_LIMITを選ぶ。
+entryはentry_planで実際に約定を狙う価格。4〜12時間内に合理的に約定し得る1価格にする。
+trend_invalidationは単なる狭い損切り幅ではなく、その価格まで逆行すれば1h/4hの予測前提が崩れたと判断できる逆指値水準。主に1h/4hの構造、20本高安、SMA、ATRから置き、RRを良く見せるためだけに不自然に近づけない。
+take_profitは4〜12時間の最初の現実的な到達目標。必ずtrend_invalidationを先に決め、その後に利確目標を決める。現実的なRRが{MIN_RR:.2f}未満なら数値を捏造せず、妥当な価格を返したうえでentry_qualityを低くする。
+BUYはtrend_invalidation < entry < take_profit、SELLはtake_profit < entry < trend_invalidation。理由は予測根拠と約定タイミングを含む短い日本語1文。"""
+
+MGMT_INSTRUCTIONS = """FXデイトレ〜短期スイングの既存建玉/未約定注文を、今後4〜12時間の市場構造を基準に管理する。外部情報は禁止、入力だけを使う。
+目的は年間期待値とドローダウン管理。ctx.prev_actionと現在構造を比較し、有意な変化がなければHOLD/KEEP_ORDERを優先する。含み損を理由に逆指値を損失側へ広げない。ctx.eventsに重要指標が近ければ急変リスクも考慮する。
+4h=大局とトレンド仮説、1h=管理判断の主軸、15m=短期変化。
+position: HOLD/CLOSE/TAKE_PARTIAL/TIGHTEN_SL/REVIEW_MANUALLY。トレンドがまだ有効ならtrend_invalidationに「ここを抜けたら保有前提が崩れる価格」を返す。CLOSE/REVIEW_MANUALLYで有効な水準を定義できない場合はnull可。TIGHTEN_SLではこの水準を実際の提案逆指値として扱う。
+order: KEEP_ORDER/CANCEL_ORDER/REPRICE_ORDER/REVIEW_MANUALLY。未約定注文がまだ有効ならrecommended_order_priceに「現在の構造から最も合理的に約定を狙う価格」を必ず返す。KEEP_ORDERでも現在注文価格が妥当か比較できるよう数値を返す。CANCEL_ORDER/REVIEW_MANUALLYで新規約定自体を推奨しない場合のみnull可。
+注文価格はorders内のOPEN注文のside/type/priceと現在Bid/Askを踏まえ、LIMITなら押し目/戻り、STOPならブレイク水準として考える。注文種別を暗黙に逆転させる価格は出さない。
+take_partial_pctはTAKE_PARTIAL時だけ数値、それ以外null。曖昧・複雑ならREVIEW_MANUALLY。理由は日本語で短く1文。"""
 
 
-def _validate_result(result):
+def _client() -> OpenAI:
+    key = os.getenv("OPENAI_API_KEY")
+    if not key:
+        raise RuntimeError("OPENAI_API_KEY が未設定です")
+    return OpenAI(api_key=key)
+
+
+def _compact(obj: Any) -> Any:
+    if isinstance(obj, dict):
+        return {k: _compact(v) for k, v in obj.items() if v is not None}
+    if isinstance(obj, list):
+        return [_compact(v) for v in obj]
+    if isinstance(obj, float):
+        if not math.isfinite(obj):
+            return None
+        return float(f"{obj:.8g}")
+    return obj
+
+
+def _entry_payload(item: dict) -> dict:
+    return _compact({
+        "symbol": item["symbol"],
+        "bid": float(item["bid"]),
+        "ask": float(item["ask"]),
+        "tf": item["ai_input"].get("tf", {}),
+    })
+
+
+def _validate_entry(result: dict, item: dict) -> tuple[bool, str | None]:
     try:
-        score = float(result.get("trend_score", 0))
-        direction = result.get("direction")
-        oco = result.get("ifd_oco", [])
+        score = float(result["trend_score"])
+        quality = float(result["entry_quality"])
+        entry_plan = str(result["entry_plan"])
+        entry = float(result["entry"])
+        invalidation = float(result["trend_invalidation"])
+        tp = float(result["take_profit"])
+        if not (-1 <= score <= 1 and 0 <= quality <= 1):
+            return False, "score range"
+        direction = "buy" if score > 0 else "sell" if score < 0 else None
+        if direction is None:
+            return False, "trend_score=0"
+        if direction == "buy" and not (invalidation < entry < tp):
+            return False, "buy price ordering"
+        if direction == "sell" and not (tp < entry < invalidation):
+            return False, "sell price ordering"
+        risk = abs(entry - invalidation)
+        reward = abs(tp - entry)
+        if risk <= 0 or reward / risk < MIN_RR - 1e-9:
+            return False, "RR不足"
+        atr = float(item["ai_input"].get("tf", {}).get("15m", {}).get("f", {}).get("atr", 0) or 0)
+        bid = float(item["bid"])
+        ask = float(item["ask"])
+        current = ask if direction == "buy" else bid
+        if entry_plan == "PULLBACK_LIMIT":
+            if direction == "buy" and not entry < ask:
+                return False, "BUY PULLBACK_LIMITはAskより下である必要がある"
+            if direction == "sell" and not entry > bid:
+                return False, "SELL PULLBACK_LIMITはBidより上である必要がある"
+        elif entry_plan == "BREAKOUT_STOP":
+            if direction == "buy" and not entry > ask:
+                return False, "BUY BREAKOUT_STOPはAskより上である必要がある"
+            if direction == "sell" and not entry < bid:
+                return False, "SELL BREAKOUT_STOPはBidより下である必要がある"
+        elif entry_plan == "ENTER_NOW":
+            # 「今入る」と言いながら現在値から大きく離れた価格を出す矛盾を防ぐ。
+            if atr > 0 and abs(entry - current) > atr * 0.25:
+                return False, "ENTER_NOWの約定値が現在値から遠すぎる"
+        else:
+            return False, "unknown entry_plan"
+        if atr > 0 and abs(entry - current) > atr * 1.75:
+            return False, "Entryが現在値から遠すぎる"
+        # トレンド崩壊ラインが15mノイズ内に極端に近すぎる場合は採用しない。
+        if atr > 0 and risk < atr * 0.35:
+            return False, "trend_invalidationが15m ATRに対して近すぎる"
+        return True, None
+    except (KeyError, TypeError, ValueError):
+        return False, "parse error"
 
-        if direction not in {"buy", "sell"} or len(oco) != 3:
-            return False
-        if score > 0 and direction != "buy":
-            return False
-        if score < 0 and direction != "sell":
-            return False
-        if {x.get("risk") for x in oco} != {"Low", "Medium", "High"}:
-            return False
 
-        sl_distances = []
-        tp_distances = []
-        by_risk = {item["risk"]: item for item in oco}
-        for risk in ("Low", "Medium", "High"):
-            item = by_risk[risk]
-            entry = float(item["entry"])
-            sl = float(item["stop_loss"])
-            tp = float(item["take_profit"])
-            if direction == "buy" and not (sl < entry < tp):
-                return False
-            if direction == "sell" and not (tp < entry < sl):
-                return False
-            sl_distances.append(abs(entry - sl))
-            tp_distances.append(abs(tp - entry))
-
-        if sl_distances != sorted(sl_distances) or tp_distances != sorted(tp_distances):
-            return False
-        return True
-    except (TypeError, ValueError, KeyError):
-        return False
-
-
-def _normalize_result(result):
-    score = max(-1.0, min(1.0, float(result.get("trend_score", 0))))
-    result["trend_score"] = score
-    result["signal_strength"] = abs(score)
-    risk_order = {"Low": 0, "Medium": 1, "High": 2}
-    result["ifd_oco"].sort(key=lambda x: risk_order[x["risk"]])
-
-    # 旧通知コードとの互換用。確率ではなく方向スコア由来。
-    result["up_probability"] = max(score, 0)
-    result["down_probability"] = abs(min(score, 0))
+def _normalize_entry(result: dict) -> dict:
+    score = float(result["trend_score"])
+    direction = "buy" if score > 0 else "sell"
+    entry = float(result["entry"])
+    invalidation = float(result["trend_invalidation"])
+    tp = float(result["take_profit"])
+    result = dict(result)
+    result.update({
+        "trend_score": score,
+        "entry_quality": float(result["entry_quality"]),
+        "entry_plan": str(result["entry_plan"]),
+        "direction": direction,
+        "entry": entry,
+        "trend_invalidation": invalidation,
+        # DB/リスク計算/仮想追跡との後方互換。意味は「トレンド前提が崩れる逆指値」。
+        "stop_loss": invalidation,
+        "take_profit": tp,
+        "rr": abs(tp - entry) / abs(entry - invalidation),
+    })
     return result
 
 
-def _request_batch(items, model_name=DEFAULT_MODEL):
-    """指定された銘柄群を1回のResponses APIで分析する内部関数。"""
+def _request_entry(items: list[dict], model_name: str) -> tuple[dict[str, dict], list[str], bool]:
     if not items:
-        return {}
-
-    expected_symbols = [item["symbol"] for item in items]
-    if len(set(expected_symbols)) != len(expected_symbols):
-        raise ValueError("batch items contain duplicate symbols")
-
-    markets = [
-        build_analysis_payload(
-            item["ai_input"],
-            item["symbol"],
-            float(item["bid"]),
-            float(item["ask"]),
-        )
-        for item in items
-    ]
-    compact_input = json.dumps({"markets": markets}, ensure_ascii=False, separators=(",", ":"))
-
-    client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+        return {}, [], False
+    expected = [x["symbol"] for x in items]
+    payload = json.dumps({"markets": [_entry_payload(x) for x in items]}, ensure_ascii=False, separators=(",", ":"))
     try:
-        response = client.responses.create(
+        response = _client().responses.create(
             model=model_name,
-            instructions=MARKET_ANALYST_INSTRUCTIONS,
-            input=compact_input,
-            reasoning={"effort": MARKET_REASONING_EFFORT},
+            instructions=ENTRY_INSTRUCTIONS,
+            input=payload,
+            reasoning={"effort": MARKET_REASONING_EFFORT, "context": "current_turn"},
             text={
                 "verbosity": "low",
-                "format": {
-                    "type": "json_schema",
-                    "name": "fx_market_batch_analysis",
-                    "strict": True,
-                    "schema": MARKET_BATCH_SCHEMA,
-                },
+                "format": {"type": "json_schema", "name": "fx_entry_batch", "strict": True, "schema": ENTRY_BATCH_SCHEMA},
             },
             max_output_tokens=market_max_output_tokens(len(items)),
             store=False,
         )
-        log_usage(response, f"market-batch:{len(items)}")
+        log_usage(response, f"entry-batch:{len(items)}")
         parsed = json.loads(response.output_text)
     except Exception as exc:
-        print(f"OpenAI一括分析に失敗しました: {exc}")
-        return {}
+        print(f"OpenAI Entry batch failed: {exc}")
+        return {}, expected, True
 
-    results = parsed.get("results", [])
-    by_symbol = {}
-    for result in results:
-        symbol = result.get("symbol")
-        if symbol not in expected_symbols or symbol in by_symbol:
-            print(f"AI出力に不正なsymbolがあります: {symbol}")
-            return {}
-        if not _validate_result(result):
-            print(f"AI出力の整合性チェックに失敗しました ({symbol}): {result}")
-            return {}
-        by_symbol[symbol] = _normalize_result(result)
+    item_map = {x["symbol"]: x for x in items}
+    valid: dict[str, dict] = {}
+    invalid: list[str] = []
+    seen: set[str] = set()
+    for row in parsed.get("results", []):
+        symbol = row.get("symbol")
+        if symbol not in item_map or symbol in seen:
+            continue
+        seen.add(symbol)
+        ok, reason = _validate_entry(row, item_map[symbol])
+        if ok:
+            valid[symbol] = _normalize_entry(row)
+        else:
+            print(f"Entry semantic validation failed {symbol}: {reason}")
+            invalid.append(symbol)
+    invalid.extend(s for s in expected if s not in seen)
+    return valid, list(dict.fromkeys(invalid)), False
 
-    if set(by_symbol) != set(expected_symbols):
-        missing = sorted(set(expected_symbols) - set(by_symbol))
-        print(f"AI一括分析で銘柄が欠落しました: {missing}")
-        return {}
 
-    return by_symbol
-
-
-def analyze_ai_inputs_batch(items, model_name=DEFAULT_MODEL):
-    """
-    Stage1通過済みの複数FX銘柄を原則1回のResponses APIで独立分析する。
-    バッチ応答が不正な場合だけ、信頼性優先で単銘柄呼び出しへフォールバックする。
-    """
+def analyze_entry_batch(items: list[dict], model_name: str = DEFAULT_MODEL) -> dict[str, dict]:
     if not items:
         return {}
+    if not BATCH_ANALYSIS_ENABLED and len(items) > 1:
+        out: dict[str, dict] = {}
+        for item in items:
+            out.update(analyze_entry_batch([item], model_name))
+        return out
+    if len(items) > BATCH_MAX_SYMBOLS:
+        out: dict[str, dict] = {}
+        for i in range(0, len(items), BATCH_MAX_SYMBOLS):
+            out.update(analyze_entry_batch(items[i:i + BATCH_MAX_SYMBOLS], model_name))
+        return out
+    valid, invalid, transport_error = _request_entry(items, model_name)
+    if transport_error or not invalid:
+        return valid
+    by_symbol = {x["symbol"]: x for x in items}
+    for symbol in invalid:
+        one, _, failed = _request_entry([by_symbol[symbol]], model_name)
+        if not failed and symbol in one:
+            valid[symbol] = one[symbol]
+    return valid
 
-    results = _request_batch(items, model_name=model_name)
-    if results or len(items) == 1:
-        return results
 
-    print("一括分析が不正だったため、単銘柄分析へフォールバックします。")
-    recovered = {}
-    for item in items:
-        single = _request_batch([item], model_name=model_name)
-        if item["symbol"] in single:
-            recovered[item["symbol"]] = single[item["symbol"]]
-    return recovered
-
-
-def analyze_ai_input(
-    ai_input,
-    symbol,
-    latest_price=None,
-    model_name=DEFAULT_MODEL,
-    latest_bid=None,
-    latest_ask=None,
-):
-    """単一銘柄用の互換ラッパー。内部ではバッチAPIを1件で使用する。"""
-    fallback_bid = ai_input.get("latest_rate", {}).get("bid", latest_price)
-    fallback_ask = ai_input.get("latest_rate", {}).get("ask", latest_price)
-    if latest_bid is None:
-        latest_bid = fallback_bid
-    if latest_ask is None:
-        latest_ask = fallback_ask
-    if latest_bid is None or latest_ask is None:
-        raise ValueError("bid/ask is required")
-
-    results = analyze_ai_inputs_batch([
-        {
-            "symbol": symbol,
-            "ai_input": ai_input,
-            "bid": float(latest_bid),
-            "ask": float(latest_ask),
+def _management_payload(item: dict) -> dict:
+    """Private APIの生JSONをそのまま送らず、管理判断に必要な項目だけ渡す。"""
+    out = {
+        "symbol": item["symbol"],
+        "kind": item.get("kind"),
+        "bid": item.get("bid"),
+        "ask": item.get("ask"),
+        "tf": item.get("tf", {}),
+        "ctx": item.get("ctx", {}),
+    }
+    if item.get("kind") == "position":
+        p = item.get("position") or {}
+        out["position"] = {
+            "side": p.get("side"),
+            "size": p.get("sumPositionSize", p.get("size")),
+            "avg": p.get("averagePositionRate", p.get("price")),
+            "lossGain": p.get("positionLossGain", p.get("lossGain")),
+            "swap": p.get("sumTotalSwap", p.get("totalSwap")),
         }
-    ], model_name=model_name)
-    return results.get(symbol)
+    orders = []
+    for o in item.get("orders", []):
+        orders.append({
+            "id": o.get("orderId"),
+            "root": o.get("rootOrderId"),
+            "side": o.get("side"),
+            "type": o.get("executionType"),
+            "settle": o.get("settleType"),
+            "size": o.get("size"),
+            "price": o.get("price"),
+            "status": o.get("status"),
+        })
+    if orders:
+        out["orders"] = orders
+    return _compact(out)
 
 
-if __name__ == "__main__":
-    import argparse
+def _request_management(items: list[dict], model_name: str) -> dict[str, dict]:
+    if not items:
+        return {}
+    expected = {x["symbol"] for x in items}
+    payload = json.dumps({"items": [_management_payload(x) for x in items]}, ensure_ascii=False, separators=(",", ":"))
+    try:
+        response = _client().responses.create(
+            model=model_name,
+            instructions=MGMT_INSTRUCTIONS,
+            input=payload,
+            reasoning={"effort": MANAGEMENT_REASONING_EFFORT, "context": "current_turn"},
+            text={
+                "verbosity": "low",
+                "format": {"type": "json_schema", "name": "fx_management_batch", "strict": True, "schema": MGMT_BATCH_SCHEMA},
+            },
+            max_output_tokens=management_max_output_tokens(len(items)),
+            store=False,
+        )
+        log_usage(response, f"management-batch:{len(items)}")
+        rows = json.loads(response.output_text).get("results", [])
+    except Exception as exc:
+        print(f"OpenAI Management batch failed: {exc}")
+        return {}
 
-    parser = argparse.ArgumentParser()
-    parser.add_argument("ai_input_file", type=str)
-    parser.add_argument("--symbol", type=str, required=True)
-    parser.add_argument("--latest_bid", type=float, required=True)
-    parser.add_argument("--latest_ask", type=float, required=True)
-    parser.add_argument("--model", type=str, default=DEFAULT_MODEL)
-    args = parser.parse_args()
+    out: dict[str, dict] = {}
+    item_map = {x["symbol"]: x for x in items}
+    for row in rows:
+        symbol = row.get("symbol")
+        if symbol not in expected or symbol in out:
+            continue
+        kind = item_map[symbol].get("kind")
+        action = row.get("action")
+        allowed = {
+            "position": {"HOLD", "CLOSE", "TAKE_PARTIAL", "TIGHTEN_SL", "REVIEW_MANUALLY"},
+            "order": {"KEEP_ORDER", "CANCEL_ORDER", "REPRICE_ORDER", "REVIEW_MANUALLY"},
+        }.get(kind, {"REVIEW_MANUALLY"})
+        if action not in allowed:
+            row["action"] = "REVIEW_MANUALLY"
+            row["reason"] = "AI actionが現在状態に適合しないため手動確認"
+        out[symbol] = row
+    return out
 
-    with open(args.ai_input_file, "r", encoding="utf-8") as f:
-        ai_input = json.load(f)
 
-    result = analyze_ai_input(
-        ai_input,
-        args.symbol,
-        model_name=args.model,
-        latest_bid=args.latest_bid,
-        latest_ask=args.latest_ask,
-    )
-    print(json.dumps(result, indent=2, ensure_ascii=False))
+def analyze_management_batch(items: list[dict], model_name: str = DEFAULT_MODEL) -> dict[str, dict]:
+    if not BATCH_ANALYSIS_ENABLED and len(items) > 1:
+        out: dict[str, dict] = {}
+        for item in items:
+            out.update(_request_management([item], model_name))
+        return out
+    if len(items) > BATCH_MAX_SYMBOLS:
+        out: dict[str, dict] = {}
+        for i in range(0, len(items), BATCH_MAX_SYMBOLS):
+            out.update(analyze_management_batch(items[i:i + BATCH_MAX_SYMBOLS], model_name))
+        return out
+    return _request_management(items, model_name)
+
+
+# 旧呼び出しとの互換用
+def analyze_ai_inputs_batch(items, model_name=DEFAULT_MODEL):
+    return analyze_entry_batch(items, model_name)
+
+
+def analyze_ai_input(ai_input, symbol, latest_price=None, model_name=DEFAULT_MODEL, latest_bid=None, latest_ask=None):
+    bid = latest_bid if latest_bid is not None else latest_price
+    ask = latest_ask if latest_ask is not None else latest_price
+    if bid is None or ask is None:
+        raise ValueError("bid/ask is required")
+    return analyze_entry_batch([{"symbol": symbol, "ai_input": ai_input, "bid": bid, "ask": ask}], model_name).get(symbol)

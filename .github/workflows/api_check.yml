@@ -1,7 +1,11 @@
 name: GMO FX Data Pipeline
 
 on:
+  # 時刻管理は外部cron側。GitHub Actions側にはscheduleを持たせない。
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 concurrency:
   group: gmo-fx-data-pipeline
@@ -10,44 +14,51 @@ concurrency:
 jobs:
   run_pipeline:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
 
     env:
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      GMO_FX_API_KEY: ${{ secrets.GMO_FX_API_KEY }}
+      GMO_FX_API_SECRET: ${{ secrets.GMO_FX_API_SECRET }}
       DISCORD_FOREX_MAIN: ${{ secrets.DISCORD_FOREX_MAIN }}
       DISCORD_FOREX_OTHER: ${{ secrets.DISCORD_FOREX_OTHER }}
+      DISCORD_FOREX_EVENT: ${{ secrets.DISCORD_FOREX_EVENT }}
       OPENAI_MODEL: gpt-5.6-luna
-      OPENAI_MARKET_REASONING_EFFORT: low
+      OPENAI_MARKET_REASONING_EFFORT: medium
+      OPENAI_MANAGEMENT_REASONING_EFFORT: medium
       OPENAI_BATCH_ANALYSIS: "true"
+      OPENAI_BATCH_MAX_SYMBOLS: "6"
+      BOT_STATE_DIR: state
+      BOT_STATE_DB: state/fxbot.sqlite3
+      CALENDAR_CACHE_PATH: state/ff_calendar_cache.json
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: '3.12'
+          cache: 'pip'
+
+      # GitHub-hosted runnerは毎回初期化されるため、判断履歴/仮想成績/カレンダーcacheを復元する。
+      # run_idをキーに含め、restore-keysで直近のstateを引き継ぐ。
+      - name: Restore persistent bot state
+        uses: actions/cache@v4
+        with:
+          path: state
+          key: fxbot-state-${{ github.ref_name }}-${{ github.run_id }}
+          restore-keys: |
+            fxbot-state-${{ github.ref_name }}-
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pandas requests "openai==3.2.0"
+          pip install -r requirements.txt
 
-      - name: Run FX pipeline
+      - name: Run FX bot once
         shell: bash
         run: |
           set -euo pipefail
-
-          weekday_jst=$(TZ=Asia/Tokyo date +%u)
-          if [[ "$weekday_jst" -gt 5 ]]; then
-            echo "FX weekend: pipeline skipped."
-            exit 0
-          fi
-
-          # データ処理は全銘柄を一括実行。
-          python fetch_gmo_ohlcv.py symbols.csv
-          python ohlcv_calc.py symbols.csv
-          python prepare_features.py symbols.csv
-
-          # Stage1を全銘柄に適用後、通過銘柄だけを1回のOpenAI APIで一括分析。
-          python notify_discord_all.py --symbols_file symbols.csv
+          python run_bot.py --symbols_file symbols.csv

@@ -1,137 +1,125 @@
+from __future__ import annotations
+
+import argparse
 import json
+import math
 import os
-import sys
 
 import pandas as pd
+
+from symbol_config import load_symbols
 
 TIMEFRAMES = {"15m": "15min", "1h": "1hour", "4h": "4hour"}
 
 
-def calculate_features(df):
-    df20 = df.tail(20).reset_index(drop=True)
-    returns = df20["Close"].pct_change().dropna()
-
-    features_summary = {
-        "sma20": float(df20["Close"].mean()),
-        "sma50": float(df.tail(50)["Close"].mean()) if len(df) >= 50 else float("nan"),
-        "rsi14": float(df20["RSI_14"].iloc[-1]),
-        "macd": float(df20["MACD"].iloc[-1]),
-        "macd_signal": float(df20["MACD_signal"].iloc[-1]),
-        "avg_ret20": float(returns.mean()) if not returns.empty else 0.0,
-        "std_ret20": float(returns.std()) if not returns.empty else 0.0,
-        "trend_up_ratio": float((returns > 0).mean()) if not returns.empty else 0.5,
-        "last_ret": float(returns.iloc[-1]) if not returns.empty else 0.0,
-        "atr14": float(df20["ATR_14"].iloc[-1]),
-        "atr_pct": float(df20["ATR_14"].iloc[-1] / df20["Close"].iloc[-1] * 100),
-    }
-
-    # 新しい足から3本だけ送る。FXのVolumeはLLM入力に含めない。
-    recent_rows = df.tail(3).iloc[::-1]
-    recent_ohlc = [
-        {"o": float(r.Open), "h": float(r.High), "l": float(r.Low), "c": float(r.Close)}
-        for _, r in recent_rows.iterrows()
-    ]
-    return recent_ohlc, features_summary
+def _safe(value, default=0.0):
+    try:
+        v = float(value)
+        return v if math.isfinite(v) else default
+    except (TypeError, ValueError):
+        return default
 
 
-def derive_market_phase(df):
-    sma20 = df["SMA_20"].iloc[-1]
-    sma50 = df["SMA_50"].iloc[-1]
-    close = df["Close"].iloc[-1]
-
-    if close > sma20 > sma50:
-        return "strong_uptrend"
-    if sma20 > close > sma50:
-        return "pullback_uptrend"
-    if close < sma20 < sma50:
-        return "strong_downtrend"
-    if sma20 < close < sma50:
-        return "pullback_downtrend"
-    return "range"
-
-
-def derive_phase_tags(df):
-    rsi = df["RSI_14"].iloc[-1]
-    ret = df["Close"].pct_change().tail(5)
-    tags = []
-
-    if rsi < 30:
-        tags.append("oversold")
-    elif rsi > 70:
-        tags.append("overbought")
-
-    total_std = df["Close"].pct_change().std()
-    if ret.std() < total_std * 0.7:
-        tags.append("volatility_contraction")
-    if not ret.empty and abs(ret.iloc[-1]) > ret.std() * 1.5:
-        tags.append("impulse_bar")
-    return tags
-
-
-def derive_price_context(df):
-    recent = df.tail(20)
-    high = recent["High"].max()
-    low = recent["Low"].min()
-    close = df["Close"].iloc[-1]
-    return {
-        "position_in_20bar_range": round((close - low) / (high - low + 1e-9), 3),
-        "distance_from_high_pct": round((close - high) / high * 100, 2),
-        "distance_from_low_pct": round((close - low) / low * 100, 2),
-    }
-
-
-def derive_volatility_state(df):
+def derive_regime(df: pd.DataFrame) -> str:
+    row = df.iloc[-1]
+    close = _safe(row["Close"])
+    sma20 = _safe(row["SMA_20"], close)
+    sma50 = _safe(row["SMA_50"], close)
+    adx = _safe(row.get("ADX_14"), 0)
+    plus_di = _safe(row.get("PLUS_DI_14"), 0)
+    minus_di = _safe(row.get("MINUS_DI_14"), 0)
     ret = df["Close"].pct_change()
-    recent_std = ret.tail(20).std()
-    past_std = ret.tail(100).std()
-    ratio = recent_std / (past_std + 1e-9)
+    recent_vol = _safe(ret.tail(20).std(), 0)
+    base_vol = _safe(ret.tail(100).std(), recent_vol or 1e-9)
+    vol_ratio = recent_vol / max(base_vol, 1e-9)
+
+    if vol_ratio >= 1.8:
+        return "HIGH_VOL"
+    if adx < 18:
+        return "RANGE"
+    if adx >= 20 and sma20 > sma50 and plus_di >= minus_di:
+        return "TREND_UP"
+    if adx >= 20 and sma20 < sma50 and minus_di >= plus_di:
+        return "TREND_DOWN"
+    return "TRANSITION"
+
+
+def summarize(df: pd.DataFrame) -> dict:
+    last = df.iloc[-1]
+    close = _safe(last["Close"])
+    atr = max(_safe(last["ATR_14"]), 1e-9)
+    sma20 = _safe(last["SMA_20"], close)
+    sma50 = _safe(last["SMA_50"], close)
+    macd = _safe(last["MACD"])
+    macd_signal = _safe(last["MACD_signal"])
+    returns = df["Close"].pct_change().dropna().tail(20)
+    recent = df.tail(20)
+    high = _safe(recent["High"].max(), close)
+    low = _safe(recent["Low"].min(), close)
+    sma20_prev = _safe(df["SMA_20"].iloc[-6], sma20) if len(df) >= 6 else sma20
+    sma50_prev = _safe(df["SMA_50"].iloc[-6], sma50) if len(df) >= 6 else sma50
+    total_ret = df["Close"].pct_change().dropna()
+    recent_std = _safe(total_ret.tail(20).std())
+    base_std = _safe(total_ret.tail(100).std(), recent_std or 1e-9)
+
+    # 絶対値より価格桁に依存しにくい正規化特徴を優先する。
     return {
-        "volatility_level": "high" if ratio > 1.3 else "low" if ratio < 0.8 else "normal",
-        "volatility_ratio": round(ratio, 2),
+        "reg": derive_regime(df),
+        "rsi": round(_safe(last["RSI_14"], 50), 2),
+        "adx": round(_safe(last.get("ADX_14")), 2),
+        "pdi": round(_safe(last.get("PLUS_DI_14")), 2),
+        "mdi": round(_safe(last.get("MINUS_DI_14")), 2),
+        "s20": round((close - sma20) / atr, 3),
+        "s50": round((close - sma50) / atr, 3),
+        "sl20": round((sma20 - sma20_prev) / atr, 3),
+        "sl50": round((sma50 - sma50_prev) / atr, 3),
+        "macd": round(macd / atr, 3),
+        "mh": round((macd - macd_signal) / atr, 3),
+        "atrp": round(atr / close * 100, 4) if close else 0,
+        "vr": round(recent_std / max(base_std, 1e-9), 3),
+        "h20": round((high - close) / atr, 3),
+        "l20": round((close - low) / atr, 3),
+        "ret20": round(_safe(returns.mean()) * 100, 4),
+        "up20": round(_safe((returns > 0).mean(), 0.5), 3),
+        "last": round(_safe(returns.iloc[-1]) * 100, 4) if not returns.empty else 0,
+        "atr": round(atr, 7),
     }
 
 
-def prepare_ai_input(symbols_csv):
-    df_symbols = pd.read_csv(symbols_csv)
+def recent_ohlc(df: pd.DataFrame) -> list[list[float]]:
+    # [O,H,L,C]、古い→新しい。モデルには凡例を明示する。
+    rows = df.tail(4)
+    return [
+        [round(_safe(r.Open), 7), round(_safe(r.High), 7), round(_safe(r.Low), 7), round(_safe(r.Close), 7)]
+        for _, r in rows.iterrows()
+    ]
 
-    for symbol in df_symbols["symbol"].dropna().astype(str):
-        result = {"symbol": symbol}
-        phases = {}
 
-        for tf_label, tf_suffix in TIMEFRAMES.items():
-            fname = f"{symbol}_{tf_suffix}_forex_features.csv"
-            if not os.path.exists(fname):
-                continue
-
-            df = pd.read_csv(fname)
-            recent_ohlc, features = calculate_features(df)
-            phase_label = derive_market_phase(df)
-            phase_tags = derive_phase_tags(df)
-            phases[tf_label] = phase_label
-
-            result.setdefault("timeframes", {})[tf_label] = {
-                "market_phase": {"label": phase_label, "tags": phase_tags},
-                "price_context": derive_price_context(df),
-                "volatility_state": derive_volatility_state(df),
-                "recent_ohlc": recent_ohlc,
-                "features_summary": features,
-            }
-
-        if "4h" in phases and "1h" in phases:
-            dominant = "4h" if "trend" in phases["4h"] else "1h"
-        else:
-            dominant = "1h"
-
-        result["timeframe_relationship"] = {"dominant_tf": dominant, "alignment": phases}
-
-        out_name = f"{symbol}_ai_input.json"
-        with open(out_name, "w", encoding="utf-8") as f:
+def prepare_ai_input(symbols_csv: str):
+    for symbol in load_symbols(symbols_csv):
+        result = {"symbol": symbol, "tf": {}}
+        complete = True
+        for label, suffix in TIMEFRAMES.items():
+            path = f"{symbol}_{suffix}_forex_features.csv"
+            if not os.path.exists(path):
+                complete = False
+                break
+            df = pd.read_csv(path)
+            if len(df) < 60:
+                complete = False
+                break
+            result["tf"][label] = {"f": summarize(df), "c": recent_ohlc(df)}
+        if not complete:
+            print(f"Skip AI input {symbol}: timeframe不足")
+            continue
+        out = f"{symbol}_ai_input.json"
+        with open(out, "w", encoding="utf-8") as f:
             json.dump(result, f, ensure_ascii=False, separators=(",", ":"))
-        print(f"Saved {out_name}")
+        print(f"Saved {out}")
 
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("Usage: python prepare_features.py symbols.csv")
-        sys.exit(1)
-    prepare_ai_input(sys.argv[1])
+    parser = argparse.ArgumentParser()
+    parser.add_argument("symbols_csv")
+    args = parser.parse_args()
+    prepare_ai_input(args.symbols_csv)

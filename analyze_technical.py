@@ -1,70 +1,66 @@
-# analyze_technical.py
+from __future__ import annotations
+
+from bot_config import MAX_SPREAD_ATR_RATIO
 
 
-def evaluate_technical_risk(timeframes, direction=None):
-    """Stage1でLLM呼び出し可否、Stage2で最終拒否権を判定する。"""
-    warnings = []
-    block = False
-    stage1_reasons = []
+def _reg(ai_input: dict, tf: str) -> str:
+    return str(ai_input.get("tf", {}).get(tf, {}).get("f", {}).get("reg", ""))
 
-    tf_4h = timeframes.get("4h", {})
-    fs_4h = tf_4h.get("features_summary", {})
-    phase_4h = tf_4h.get("market_phase", {}).get("label", "")
-    rsi_4h = fs_4h.get("rsi14", 50)
 
-    phase_15m = timeframes.get("15m", {}).get("market_phase", {}).get("label", "")
-    phase_1h = timeframes.get("1h", {}).get("market_phase", {}).get("label", "")
+def _feat(ai_input: dict, tf: str, key: str, default=0.0):
+    try:
+        return float(ai_input.get("tf", {}).get(tf, {}).get("f", {}).get(key, default))
+    except (TypeError, ValueError):
+        return default
 
-    llm_call_allowed = True
 
-    if "range" in phase_4h or phase_4h == "":
-        llm_call_allowed = False
-        stage1_reasons.append("4hがレンジ、または相場判定不可")
+def stage1_filter(ai_input: dict, bid: float, ask: float) -> dict:
+    reasons: list[str] = []
+    warnings: list[str] = []
+    reg4 = _reg(ai_input, "4h")
+    reg1 = _reg(ai_input, "1h")
+    reg15 = _reg(ai_input, "15m")
 
-    if (
-        ("uptrend" in phase_15m and "downtrend" in phase_1h)
-        or ("downtrend" in phase_15m and "uptrend" in phase_1h)
-    ):
-        llm_call_allowed = False
-        stage1_reasons.append("15mと1hのトレンドが不一致")
+    if reg4 not in {"TREND_UP", "TREND_DOWN"}:
+        reasons.append(f"4hレジーム={reg4 or 'UNKNOWN'}")
 
-    # LLMがどちらを選んでもStage2でblockされる条件は先に落とす。
-    if "uptrend" in phase_4h and rsi_4h >= 75:
-        llm_call_allowed = False
-        stage1_reasons.append("4h上昇トレンドだがRSI過熱のため新規エントリー見送り")
+    # 4hと1hが真正面から反対の場合のみ除外。15m逆行は押し目/戻り候補として残す。
+    if reg4 == "TREND_UP" and reg1 == "TREND_DOWN":
+        reasons.append("4h上昇に対し1hが下降トレンド")
+    if reg4 == "TREND_DOWN" and reg1 == "TREND_UP":
+        reasons.append("4h下降に対し1hが上昇トレンド")
 
-    if "downtrend" in phase_4h and rsi_4h <= 25:
-        llm_call_allowed = False
-        stage1_reasons.append("4h下降トレンドだがRSI売られすぎのため新規エントリー見送り")
+    if reg15 in {"HIGH_VOL"}:
+        warnings.append("15mが高ボラティリティ")
 
-    if direction:
-        if direction == "buy" and rsi_4h >= 75:
-            block = True
-            warnings.append("4h RSIが過熱（買い危険）")
-        if direction == "sell" and rsi_4h <= 25:
-            block = True
-            warnings.append("4h RSIが売られすぎ（売り危険）")
-
-        if direction == "buy" and "downtrend" in phase_4h:
-            block = True
-            warnings.append("4hが下降トレンド")
-        if direction == "sell" and "uptrend" in phase_4h:
-            block = True
-            warnings.append("4hが上昇トレンド")
-
-        if direction == "buy" and "downtrend" in phase_15m:
-            warnings.append("15mが逆行中")
-        if direction == "sell" and "uptrend" in phase_15m:
-            warnings.append("15mが逆行中")
+    atr15 = _feat(ai_input, "15m", "atr", 0)
+    spread = max(0.0, float(ask) - float(bid))
+    if atr15 <= 0:
+        reasons.append("15m ATRを取得できない")
+    elif spread / atr15 > MAX_SPREAD_ATR_RATIO:
+        reasons.append(f"スプレッド/15mATR={spread/atr15:.2f} が過大")
 
     return {
-        "llm_call_allowed": llm_call_allowed,
-        "stage1_reasons": stage1_reasons,
-        "block": block,
+        "llm_call_allowed": not reasons,
+        "stage1_reasons": reasons,
         "warnings": warnings,
+        "regime_4h": reg4,
+        "regime_1h": reg1,
+        "regime_15m": reg15,
     }
 
 
-def analyze_ai_input(ai_input, llm_result=None):
-    direction = llm_result.get("direction") if llm_result else None
-    return evaluate_technical_risk(ai_input.get("timeframes", {}), direction)
+def post_validate_direction(ai_input: dict, direction: str) -> tuple[bool, list[str]]:
+    reg4 = _reg(ai_input, "4h")
+    warnings: list[str] = []
+    if direction == "buy" and reg4 != "TREND_UP":
+        return False, [f"BUYだが4hレジーム={reg4}"]
+    if direction == "sell" and reg4 != "TREND_DOWN":
+        return False, [f"SELLだが4hレジーム={reg4}"]
+
+    rsi15 = _feat(ai_input, "15m", "rsi", 50)
+    if direction == "buy" and rsi15 >= 80:
+        warnings.append("15m RSI>=80で高値追いリスク")
+    if direction == "sell" and rsi15 <= 20:
+        warnings.append("15m RSI<=20で安値追いリスク")
+    return True, warnings
