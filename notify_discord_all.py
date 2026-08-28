@@ -706,6 +706,7 @@ def run(symbols_file: str = "symbols.csv", model: str = DEFAULT_MODEL) -> None:
         eligible.append({"symbol": symbol, "ai_input": ai, "bid": rate["bid"], "ask": rate["ask"]})
 
     for symbol, reasons in pre_reasons.items():
+        print(f"Entry Stage1 skip {symbol}: " + " / ".join(reasons))
         send_discord(_skip_embed(symbol, reasons, run_timestamp), DISCORD_FOREX_OTHER)
 
     results = analyze_entry_batch(eligible, model) if eligible else {}
@@ -849,7 +850,10 @@ def run(symbols_file: str = "symbols.csv", model: str = DEFAULT_MODEL) -> None:
                 db.create_virtual_trade(decision_id, decision)
 
     if not eligible:
-        print("新規EntryのLLM対象銘柄なし")
+        print(
+            f"新規EntryのLLM対象銘柄なし "
+            f"(flat={len(flat)}, management={len(management_states)}, manual={len(manual_states)}, skipped={len(pre_reasons)})"
+        )
 
 
 if __name__ == "__main__":

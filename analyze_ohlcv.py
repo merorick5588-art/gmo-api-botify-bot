@@ -203,26 +203,61 @@ def _normalize_entry(result: dict) -> dict:
     return result
 
 
+def _response_json_with_retry(*, label: str, create_kwargs: dict, initial_max_tokens: int) -> dict:
+    """Structured Outputがtoken上限で途中切断された場合だけ1回再試行する。"""
+    client = _client()
+    max_tokens = initial_max_tokens
+    last_exc: Exception | None = None
+    for attempt in range(2):
+        kwargs = dict(create_kwargs)
+        kwargs["max_output_tokens"] = max_tokens
+        response = client.responses.create(**kwargs)
+        log_usage(response, label if attempt == 0 else f"{label}-retry")
+        try:
+            return json.loads(response.output_text)
+        except json.JSONDecodeError as exc:
+            last_exc = exc
+            status = getattr(response, "status", None)
+            details = getattr(response, "incomplete_details", None)
+            reason = getattr(details, "reason", None) if details is not None else None
+            if attempt == 0:
+                # max_output_tokensはreasoningも消費するため、medium reasoningでJSONが
+                # 書き切れないケースに備えて十分な余白を持たせて再試行する。
+                next_max = max(max_tokens * 2, max_tokens + 1200)
+                print(
+                    f"OpenAI {label} JSON incomplete/malformed "
+                    f"(status={status}, reason={reason}, max_output_tokens={max_tokens}); "
+                    f"retry with {next_max}"
+                )
+                max_tokens = next_max
+                continue
+            raise
+    if last_exc:
+        raise last_exc
+    raise RuntimeError(f"OpenAI {label} returned no JSON")
+
+
 def _request_entry(items: list[dict], model_name: str) -> tuple[dict[str, dict], list[str], bool]:
     if not items:
         return {}, [], False
     expected = [x["symbol"] for x in items]
     payload = json.dumps({"markets": [_entry_payload(x) for x in items]}, ensure_ascii=False, separators=(",", ":"))
     try:
-        response = _client().responses.create(
-            model=model_name,
-            instructions=ENTRY_INSTRUCTIONS,
-            input=payload,
-            reasoning={"effort": MARKET_REASONING_EFFORT, "context": "current_turn"},
-            text={
-                "verbosity": "low",
-                "format": {"type": "json_schema", "name": "fx_entry_batch", "strict": True, "schema": ENTRY_BATCH_SCHEMA},
+        parsed = _response_json_with_retry(
+            label=f"entry-batch:{len(items)}",
+            initial_max_tokens=market_max_output_tokens(len(items)),
+            create_kwargs={
+                "model": model_name,
+                "instructions": ENTRY_INSTRUCTIONS,
+                "input": payload,
+                "reasoning": {"effort": MARKET_REASONING_EFFORT, "context": "current_turn"},
+                "text": {
+                    "verbosity": "low",
+                    "format": {"type": "json_schema", "name": "fx_entry_batch", "strict": True, "schema": ENTRY_BATCH_SCHEMA},
+                },
+                "store": False,
             },
-            max_output_tokens=market_max_output_tokens(len(items)),
-            store=False,
         )
-        log_usage(response, f"entry-batch:{len(items)}")
-        parsed = json.loads(response.output_text)
     except Exception as exc:
         print(f"OpenAI Entry batch failed: {exc}")
         return {}, expected, True
@@ -312,20 +347,22 @@ def _request_management(items: list[dict], model_name: str) -> dict[str, dict]:
     expected = {x["symbol"] for x in items}
     payload = json.dumps({"items": [_management_payload(x) for x in items]}, ensure_ascii=False, separators=(",", ":"))
     try:
-        response = _client().responses.create(
-            model=model_name,
-            instructions=MGMT_INSTRUCTIONS,
-            input=payload,
-            reasoning={"effort": MANAGEMENT_REASONING_EFFORT, "context": "current_turn"},
-            text={
-                "verbosity": "low",
-                "format": {"type": "json_schema", "name": "fx_management_batch", "strict": True, "schema": MGMT_BATCH_SCHEMA},
+        parsed = _response_json_with_retry(
+            label=f"management-batch:{len(items)}",
+            initial_max_tokens=management_max_output_tokens(len(items)),
+            create_kwargs={
+                "model": model_name,
+                "instructions": MGMT_INSTRUCTIONS,
+                "input": payload,
+                "reasoning": {"effort": MANAGEMENT_REASONING_EFFORT, "context": "current_turn"},
+                "text": {
+                    "verbosity": "low",
+                    "format": {"type": "json_schema", "name": "fx_management_batch", "strict": True, "schema": MGMT_BATCH_SCHEMA},
+                },
+                "store": False,
             },
-            max_output_tokens=management_max_output_tokens(len(items)),
-            store=False,
         )
-        log_usage(response, f"management-batch:{len(items)}")
-        rows = json.loads(response.output_text).get("results", [])
+        rows = parsed.get("results", [])
     except Exception as exc:
         print(f"OpenAI Management batch failed: {exc}")
         return {}

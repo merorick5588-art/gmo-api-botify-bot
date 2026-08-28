@@ -208,6 +208,12 @@ python run_bot.py --symbols_file symbols.csv
 
 `run_bot.py` は1回処理して終了します。時刻制御は既存cron側の責務です。
 
+## OpenAI出力の安全対策
+
+GPT-5.6 Lunaの `max_output_tokens` にはreasoning tokenも含まれます。medium reasoningでStructured OutputsのJSONが途中切断されないよう、新規Entry/建玉管理とも十分な出力余白を確保しています。JSONが途中切断された場合だけ、上限を拡張して1回自動再試行します。通常時にAPI呼び出し回数は増えません。
+
+新規Entry候補が0件の場合は、Stage1で除外された各銘柄の理由を標準出力にも表示します。
+
 ## GitHub Actions対応
 
 `.github/workflows/api_check.yml` を同梱しています。

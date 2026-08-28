@@ -13,11 +13,15 @@ except ValueError:
 
 
 def market_max_output_tokens(symbol_count: int) -> int:
-    return max(600, 360 * max(1, symbol_count))
+    # max_output_tokens には reasoning token も含まれる。medium reasoning では
+    # 1銘柄でも数百tokenを内部推論に使うため、JSON本体を書き切れる余白を確保する。
+    return max(1600, 550 * max(1, symbol_count) + 700)
 
 
 def management_max_output_tokens(symbol_count: int) -> int:
-    return max(500, 300 * max(1, symbol_count))
+    # Managementはreasoning+Structured Outputの合計が500tokenを超えやすい。
+    # 上限を大きくしても課金は実使用tokenのみなので、切断防止を優先する。
+    return max(1400, 500 * max(1, symbol_count) + 700)
 
 
 def log_usage(response, label: str) -> None:
