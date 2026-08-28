@@ -393,6 +393,16 @@ def _entry_embed(decision: dict, rate: dict, account: dict | None, run_timestamp
     return {"title": f"{icon} NEW ENTRY候補 — {decision['symbol']}", "color": 3066993, "fields": fields, "footer": _footer(run_timestamp)}
 
 
+def _management_requires_main(state: dict, result: dict) -> bool:
+    """人が売買/注文変更/手動確認を行う必要がある管理判断だけMAINへ送る。"""
+    action = str(result.get("action") or "").upper()
+    if state.get("kind") == "position":
+        return action in {"CLOSE", "TAKE_PARTIAL", "TIGHTEN_SL", "REVIEW_MANUALLY"}
+    if state.get("kind") == "order":
+        return action in {"CANCEL_ORDER", "REPRICE_ORDER", "REVIEW_MANUALLY"}
+    return action not in {"", "HOLD", "KEEP_ORDER"}
+
+
 def _management_embed(symbol: str, state: dict, result: dict, rate: dict, run_timestamp: str) -> dict:
     fields = [
         {"name": "状態", "value": state["kind"].upper(), "inline": True},
@@ -417,7 +427,7 @@ def _management_embed(symbol: str, state: dict, result: dict, rate: dict, run_ti
     if result.get("take_partial_pct") is not None:
         fields.append({"name": "部分利確", "value": f"{float(result['take_partial_pct']):.0f}%", "inline": True})
     fields.append({"name": "理由", "value": str(result.get("reason") or "-"), "inline": False})
-    urgent = result.get("action") not in {"HOLD", "KEEP_ORDER"}
+    urgent = _management_requires_main(state, result)
     return {
         "title": f"{'🛡' if not urgent else '⚠'} POSITION/ORDER — {symbol}",
         "color": 3447003 if not urgent else 16753920,
@@ -656,7 +666,7 @@ def run(symbols_file: str = "symbols.csv", model: str = DEFAULT_MODEL) -> None:
         db.save_decision(decision)
         embed = _management_embed(symbol, state, result, rate, run_timestamp)
         send_discord(embed, DISCORD_FOREX_OTHER)
-        if result.get("action") not in {"HOLD", "KEEP_ORDER"}:
+        if _management_requires_main(state, result):
             key = f"mgmt:{symbol}:{result.get('action')}:{result.get('trend_invalidation')}:{result.get('recommended_order_price')}"
             _send_dedup(db, key, SIGNAL_DEDUP_MINUTES, embed, DISCORD_FOREX_MAIN)
 
@@ -850,6 +860,7 @@ def run(symbols_file: str = "symbols.csv", model: str = DEFAULT_MODEL) -> None:
                 db.create_virtual_trade(decision_id, decision)
 
     if not eligible:
+        print("OpenAI Entry API call skipped: eligible=0")
         print(
             f"新規EntryのLLM対象銘柄なし "
             f"(flat={len(flat)}, management={len(management_states)}, manual={len(manual_states)}, skipped={len(pre_reasons)})"

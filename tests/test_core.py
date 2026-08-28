@@ -16,9 +16,9 @@ from analyze_technical import stage1_filter
 from economic_calendar import _parse_event, event_guard_for_symbol, fetch_calendar
 from ohlcv_calc import add_features, compute_atr, compute_rsi
 from prepare_features import derive_regime, recent_ohlc
-from risk_engine import calculate_size, quote_to_jpy_rate, total_risk_ok
+from risk_engine import calculate_size, quote_to_jpy_rate, total_risk_ok, margin_ok
 from state_db import StateDB
-from notify_discord_all import _send_dedup, _entry_plan_label
+from notify_discord_all import _send_dedup, _entry_plan_label, _management_requires_main
 from virtual_tracker import update_virtual_trades
 from symbol_config import load_symbols
 
@@ -276,6 +276,25 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(accepted, 2)
         self.assertAlmostEqual(allocated, 2.5)
 
+
+    def test_margin_ratio_150_is_allowed(self):
+        ok, reason = margin_ok({"marginRatio": "150.0"})
+        self.assertTrue(ok, reason)
+        ok, reason = margin_ok({"marginRatio": "149.9"})
+        self.assertFalse(ok)
+        self.assertIn("150%", reason)
+
+    def test_actionable_position_management_goes_main(self):
+        state = {"kind": "position"}
+        self.assertFalse(_management_requires_main(state, {"action": "HOLD"}))
+        for action in ("CLOSE", "TAKE_PARTIAL", "TIGHTEN_SL", "REVIEW_MANUALLY"):
+            self.assertTrue(_management_requires_main(state, {"action": action}), action)
+
+    def test_actionable_pending_order_management_goes_main(self):
+        state = {"kind": "order"}
+        self.assertFalse(_management_requires_main(state, {"action": "KEEP_ORDER"}))
+        for action in ("CANCEL_ORDER", "REPRICE_ORDER", "REVIEW_MANUALLY"):
+            self.assertTrue(_management_requires_main(state, {"action": action}), action)
 
 
 if __name__ == "__main__":

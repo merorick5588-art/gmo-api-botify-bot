@@ -108,6 +108,12 @@ BUY LIMITなのに現在Askより上、SELL STOPなのに現在Bidより上な�
 - 指標前後は該当通貨の新規Entry停止
 - 無料カレンダー障害時はキャッシュ、キャッシュも無効なら安全側でEntry停止
 
+## OHLC履歴本数
+
+既定は各時間足 `OHLC_TARGET_BARS=160` 本です。現行特徴量は最大でも直近100本のボラティリティ、SMA50、RSI/ATR/ADX14、MACD、20本高安を使うため、160本あれば計算上の余裕があります。Wilder/EMA系も160本時点では初期値の影響が十分小さくなります。
+
+単純に300本・500本へ増やしても、現在GPTへ渡している特徴量の窓が100本以下なので情報量はほぼ増えません。より長期履歴を予測へ効かせるなら、取得本数だけ増やすのではなく、日足、SMA100/200、50〜100本の構造高安などの長期特徴量を追加してから本数を増やす方針です。現在の4〜12時間予測では160本を維持します。
+
 ## 初期対象銘柄
 
 ```text
@@ -176,7 +182,7 @@ BASE_CAPITAL_JPY=400000
 TARGET_ANNUAL_RETURN_PCT=100
 RISK_PER_TRADE_PCT=0.75
 MAX_TOTAL_RISK_PCT=2.5
-MIN_MARGIN_RATIO=300
+MIN_MARGIN_RATIO=150
 MIN_RR=1.5
 MAX_CURRENCY_EXPOSURE_RISK=2.0
 MAX_SPREAD_ATR_RATIO=0.12
