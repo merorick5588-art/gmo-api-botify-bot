@@ -70,6 +70,12 @@ def update_virtual_trades(db: StateDB) -> list[dict]:
             last_seen = bar_time
 
             if status == "PENDING":
+                # 再起動後の一括追跡でも期限後の足で約定させない。
+                expires_at = opened_at + timedelta(hours=PENDING_EXPIRY_HOURS)
+                if bar_time + timedelta(minutes=15) > expires_at:
+                    # 期限をまたぐ足のどちら側で約定したかは復元不能。
+                    # その足には進まず、下段の期限処理で失効させる。
+                    break
                 if side == "buy":
                     touched = ask_low <= entry <= ask_high
                     tp_hit_same_bar = bid_high >= tp

@@ -274,6 +274,31 @@ class CoreTests(unittest.TestCase):
             finally:
                 os.chdir(old_cwd)
 
+    def test_pending_touch_after_expiry_cannot_activate(self):
+        with tempfile.TemporaryDirectory() as td:
+            old_cwd = os.getcwd()
+            os.chdir(td)
+            try:
+                db = StateDB(Path(td) / "v.sqlite3")
+                opened = datetime.now(timezone.utc) - timedelta(hours=14)
+                decision = {"symbol": "USD_JPY", "created_at": opened.isoformat(),
+                            "decision_type": "ENTRY", "action": "ENTER", "direction": "buy",
+                            "entry": 150, "stop_loss": 149, "take_profit": 152,
+                            "spread": 0.01, "entry_mode": "PENDING_LIMIT"}
+                did = db.save_decision(decision)
+                db.create_virtual_trade(did, decision)
+                # 約定価格に触れているが、12h期限より後の足。
+                stamp = (opened + timedelta(hours=13)).astimezone(ZoneInfo("Asia/Tokyo")).replace(tzinfo=None)
+                pd.DataFrame([{"OpenTime": stamp, "Open": 150.1, "High": 150.5,
+                               "Low": 149.5, "Close": 150.2}]).to_csv("USD_JPY_15min_forex.csv", index=False)
+                update_virtual_trades(db)
+                with db.connect() as conn:
+                    row = conn.execute("SELECT status,result,activated_at FROM virtual_trades").fetchone()
+                self.assertEqual(row["result"], "EXPIRED")
+                self.assertIsNone(row["activated_at"])
+            finally:
+                os.chdir(old_cwd)
+
     def test_pullback_notification_label(self):
         self.assertEqual(_entry_plan_label("PULLBACK_LIMIT", "buy"), "押し目買いLIMIT")
         self.assertEqual(_entry_plan_label("PULLBACK_LIMIT", "sell"), "戻り売りLIMIT")

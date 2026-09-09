@@ -13,7 +13,9 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 import requests
 
-from analyze_ohlcv import analyze_entry_batch, analyze_management_batch
+from analyze_ohlcv import ENTRY_INSTRUCTIONS, _validate_entry, analyze_entry_batch, analyze_management_batch
+from forecast_audit import evaluate_forecasts, record_forecasts
+from fetch_gmo_ohlcv import _ticker_is_fresh
 from analyze_technical import post_validate_direction, stage1_filter
 from bot_config import (
     DISCORD_FOREX_EVENT,
@@ -132,6 +134,9 @@ def _load_market_input(symbol: str) -> tuple[dict, dict] | None:
         r = row.iloc[0].to_dict()
         r["bid"] = float(r["bid"])
         r["ask"] = float(r["ask"])
+        fresh, _ = _ticker_is_fresh(r, datetime.now(timezone.utc))
+        if not fresh:
+            return None
         for key in ("tickSize", "minOpenOrderSize", "maxOrderSize", "sizeStep"):
             if key in r and pd.notna(r[key]):
                 r[key] = float(r[key])
@@ -446,6 +451,35 @@ def _manual_embed(item: dict, run_timestamp: str) -> dict:
 
 
 def _validate_management_result(state: dict, result: dict, rate: dict) -> dict:
+    try:
+        for key in ("trend_invalidation", "recommended_order_price", "take_partial_pct", "confidence"):
+            raw = result.get(key)
+            if raw is not None:
+                value = float(raw)
+                if not math.isfinite(value):
+                    raise ValueError("非有限数値")
+                if key in {"trend_invalidation", "recommended_order_price"} and value <= 0:
+                    raise ValueError("非正の価格")
+                if key == "confidence" and not 0 <= value <= 1:
+                    raise ValueError("confidence範囲外")
+        if result.get("action") == "TAKE_PARTIAL":
+            if not 0 < float(result.get("take_partial_pct")) < 100:
+                raise ValueError("部分利確率は0超100未満が必要")
+        elif result.get("take_partial_pct") is not None:
+            raise ValueError("部分利確以外の割合指定")
+        bid, ask = float(rate["bid"]), float(rate["ask"])
+        tick = float(rate.get("tickSize") or 0.00001)
+        if not all(math.isfinite(v) and v > 0 for v in (bid, ask, tick)) or bid > ask:
+            raise ValueError("不正な価格情報")
+        return _validate_management_prices(state, result, rate)
+    except (ValueError, TypeError, ArithmeticError, KeyError):
+        # 不正な数値を通知のfloat/Decimal変換に渡さない。
+        return {**result, "action": "REVIEW_MANUALLY", "confidence": 0,
+                "trend_invalidation": None, "recommended_order_price": None,
+                "take_partial_pct": None, "reason": "管理提案または価格情報の数値が不正: 手動確認"}
+
+
+def _validate_management_prices(state: dict, result: dict, rate: dict) -> dict:
     """AIは提案だけ。危険な逆指値拡大や注文種別と矛盾する約定値をPythonで拒否する。"""
     out = dict(result)
     tick = float(rate.get("tickSize") or 0.00001)
@@ -569,6 +603,7 @@ def run(symbols_file: str = "symbols.csv", model: str = DEFAULT_MODEL) -> None:
     symbols = load_symbols(symbols_file)
     db = StateDB()
     client = GMOClient()
+    evaluate_forecasts(db, now=now)
 
     # 過去の仮想シグナルを先に評価。
     for done in update_virtual_trades(db):
@@ -705,21 +740,42 @@ def run(symbols_file: str = "symbols.csv", model: str = DEFAULT_MODEL) -> None:
             pre_reasons[symbol] = reasons
             continue
         ai, rate = loaded
+        # 再取得したtickerを新規予測の価格にも使う。
+        fresh_rate = all_ticker.get(symbol)
+        fresh, _ = _ticker_is_fresh(fresh_rate or {}, datetime.now(timezone.utc))
+        if not fresh:
+            reasons.append("最新tickerの鮮度を確認できない")
+            pre_reasons[symbol] = reasons
+            continue
+        rate = {**rate, **fresh_rate}
+        market[symbol] = (ai, rate)
         blockers = event_guard_for_symbol(symbol, events, now) if calendar_status["usable"] else []
         if blockers:
             reasons.append("重要指標前後: " + ", ".join(f"{e.currency} {e.title}" for e in blockers[:3]))
-        tech = stage1_filter(ai, rate["bid"], rate["ask"])
+        tech = stage1_filter(ai, rate["bid"], rate["ask"], quote_time=rate.get("timestamp"))
         reasons.extend(tech["stage1_reasons"])
         if reasons:
             pre_reasons[symbol] = reasons
             continue
-        eligible.append({"symbol": symbol, "ai_input": ai, "bid": rate["bid"], "ask": rate["ask"]})
+        scheduled = [{"title": e.title, "currency": e.currency, "at": e.at.isoformat()}
+                     for e in events if e.impact == "High" and
+                     e.currency in {*split_symbol(symbol), "ALL"} and
+                     now <= e.at <= now + timedelta(hours=12)]
+        eligible.append({"symbol": symbol, "ai_input": ai, "bid": rate["bid"], "ask": rate["ask"], "quote_time": rate.get("timestamp"), "events": scheduled})
 
     for symbol, reasons in pre_reasons.items():
         print(f"Entry Stage1 skip {symbol}: " + " / ".join(reasons))
         send_discord(_skip_embed(symbol, reasons, run_timestamp), DISCORD_FOREX_OTHER)
 
     results = analyze_entry_batch(eligible, model) if eligible else {}
+    record_forecasts(db, eligible, results, model, ENTRY_INSTRUCTIONS)
+    # GPTの応答待ちに相場が動くため、通知候補を最新価格で再検証する。
+    if any(r.get("entry_plan") != "NO_TRADE" for r in results.values()):
+        try:
+            all_ticker = client.ticker()
+        except Exception as exc:
+            print(f"post-analysis ticker failed: {type(exc).__name__}")
+            all_ticker = {}
     candidates: list[dict[str, Any]] = []
 
     # まず各候補を単体検証。口座全体のリスク配分は品質順に後段で行う。
@@ -729,8 +785,21 @@ def run(symbols_file: str = "symbols.csv", model: str = DEFAULT_MODEL) -> None:
         if not result:
             send_discord(_skip_embed(symbol, ["AI分析結果を取得できない"], run_timestamp), DISCORD_FOREX_OTHER)
             continue
+        if result.get("entry_plan") == "NO_TRADE":
+            send_discord(_skip_embed(symbol, [result.get("reason") or "AI判断: 見送り"], run_timestamp), DISCORD_FOREX_OTHER)
+            continue
 
         ai, rate = market[symbol]
+        latest = all_ticker.get(symbol, {})
+        fresh, fresh_reason = _ticker_is_fresh(latest, datetime.now(timezone.utc))
+        if not fresh:
+            send_discord(_skip_embed(symbol, [fresh_reason or "予測後の価格鮮度を確認できない"], run_timestamp), DISCORD_FOREX_OTHER)
+            continue
+        rate = {**rate, **latest}
+        valid_now, validation_reason = _validate_entry(result, {**item, "bid": rate["bid"], "ask": rate["ask"]})
+        if not valid_now:
+            send_discord(_skip_embed(symbol, [f"予測後の価格再検証: {validation_reason}"], run_timestamp), DISCORD_FOREX_OTHER)
+            continue
         tick = float(rate.get("tickSize") or rules.get(symbol, {}).get("tickSize") or 0.00001)
         for key in ("entry", "trend_invalidation", "take_profit"):
             result[key] = _round_tick(float(result[key]), tick)

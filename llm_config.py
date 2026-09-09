@@ -7,7 +7,7 @@ BATCH_ANALYSIS_ENABLED = os.getenv("OPENAI_BATCH_ANALYSIS", "true").strip().lowe
     "0", "false", "no", "off"
 }
 try:
-    BATCH_MAX_SYMBOLS = max(1, int(os.getenv("OPENAI_BATCH_MAX_SYMBOLS", "6")))
+    BATCH_MAX_SYMBOLS = min(30, max(1, int(os.getenv("OPENAI_BATCH_MAX_SYMBOLS", "6"))))
 except ValueError:
     BATCH_MAX_SYMBOLS = 6
 

@@ -8,6 +8,7 @@ from pathlib import Path
 
 from bot_config import STATE_DB
 from state_db import StateDB
+from forecast_audit import evaluate_forecasts, report_forecasts
 
 
 def _fmt(v, digits=2):
@@ -27,7 +28,8 @@ def _max_drawdown_r(realized: list[float]) -> float:
 
 def report(db_path: str) -> None:
     # 初回でも空DBを作って安全にレポートできるようにする。
-    StateDB(Path(db_path))
+    db = StateDB(Path(db_path))
+    evaluate_forecasts(db)
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     try:
@@ -37,6 +39,7 @@ def report(db_path: str) -> None:
 
 
 def _report_with_conn(conn: sqlite3.Connection) -> None:
+    report_forecasts(conn)
     trades = list(
         conn.execute(
             """
@@ -63,6 +66,9 @@ def _report_with_conn(conn: sqlite3.Connection) -> None:
     expired = sum(1 for r in trades if r["result"] == "EXPIRED")
 
     print("=== Bot仮想シグナル成績 ===")
+    active = conn.execute("SELECT COUNT(*) FROM virtual_trades WHERE status IN ('OPEN','PENDING')").fetchone()[0]
+    print(f"追跡中（以下の損益集計から除外）: {active}")
+    print("※ 以下はTP/SL決着分のみの条件付き成績。8時間方向予測の精度や全候補の収益性ではありません。")
     print(f"評価可能: {len(scored)} trades / Ambiguous: {ambiguous} / Expired: {expired}")
     print(f"勝率: {(wins/len(scored)*100 if scored else 0):.1f}%")
     print(f"総損益: {_fmt(sum(realized))} R")

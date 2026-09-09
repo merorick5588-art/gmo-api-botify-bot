@@ -24,6 +24,8 @@ def compute_rsi(series: pd.Series, period: int = 14) -> pd.Series:
     # 損失が0なら100、利益が0なら0に寄せる。
     rsi = rsi.where(avg_loss != 0, 100.0)
     rsi = rsi.where(avg_gain != 0, 0.0)
+    # 上昇・下落ともゼロの横ばい系列は売られ過ぎではなく中立。
+    rsi = rsi.where(~((avg_gain == 0) & (avg_loss == 0)), 50.0)
     return rsi
 
 

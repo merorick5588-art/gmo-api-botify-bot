@@ -1,4 +1,5 @@
 import os
+import math
 from pathlib import Path
 
 
@@ -11,7 +12,8 @@ def _bool(name: str, default: bool) -> bool:
 
 def _float(name: str, default: float) -> float:
     try:
-        return float(os.getenv(name, str(default)))
+        value = float(os.getenv(name, str(default)))
+        return value if math.isfinite(value) else default
     except ValueError:
         return default
 

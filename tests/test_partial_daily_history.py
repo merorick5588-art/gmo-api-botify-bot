@@ -105,6 +105,8 @@ class PartialDailyHistoryTests(unittest.TestCase):
                 daily = payload["tf"]["1d"]
 
                 self.assertEqual(daily["n"], 179)
+                expected_close = (pd.Timestamp("2025-01-01", tz="Asia/Tokyo") + pd.Timedelta(days=179)).tz_convert("UTC").isoformat()
+                self.assertEqual(daily["close_time"], expected_close)
                 self.assertIn("h100", daily["f"])
                 self.assertIn("s100", daily["f"])
                 self.assertNotIn("s200", daily["f"])

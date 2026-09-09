@@ -19,7 +19,7 @@ def main(symbols_file: str = "symbols.csv", model: str = DEFAULT_MODEL) -> int:
         notify_discord_all.run(symbols_file, model)
     except SystemExit as exc:
         # 市場CLOSE等は異常再試行させるより正常終了扱いにする。
-        code = exc.code if isinstance(exc.code, int) else 0
+        code = exc.code if isinstance(exc.code, int) else (0 if exc.code is None else 1)
         print(f"run stopped: {exc}")
         return code
     except Exception as exc:

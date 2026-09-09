@@ -27,7 +27,7 @@ def account_equity_jpy(assets: dict[str, Any] | None) -> float:
     if assets:
         try:
             equity = float(assets.get("equity"))
-            if equity > 0:
+            if math.isfinite(equity) and equity > 0:
                 return equity
         except (TypeError, ValueError):
             pass
@@ -35,17 +35,25 @@ def account_equity_jpy(assets: dict[str, Any] | None) -> float:
 
 
 def quote_to_jpy_rate(symbol: str, ticker: dict[str, dict[str, Any]]) -> float | None:
+    def mid(row):
+        try:
+            bid, ask = float(row["bid"]), float(row["ask"])
+            if all(math.isfinite(v) and v > 0 for v in (bid, ask)) and bid <= ask:
+                return bid / 2 + ask / 2
+        except (KeyError, TypeError, ValueError):
+            pass
+        return None
     _, quote = split_symbol(symbol)
     if quote == "JPY":
         return 1.0
     direct = ticker.get(f"{quote}_JPY")
     if direct:
-        return (float(direct["bid"]) + float(direct["ask"])) / 2
+        return mid(direct)
     inverse = ticker.get(f"JPY_{quote}")
     if inverse:
-        mid = (float(inverse["bid"]) + float(inverse["ask"])) / 2
-        if mid > 0:
-            return 1 / mid
+        value = mid(inverse)
+        if value is not None:
+            return 1 / value
     return None
 
 
@@ -57,7 +65,16 @@ def calculate_size(
     rule: dict[str, Any],
     ticker: dict[str, dict[str, Any]],
 ) -> SizePlan:
-    distance = abs(float(entry) - float(stop_loss))
+    try:
+        entry, stop_loss, equity_jpy = map(float, (entry, stop_loss, equity_jpy))
+        if not all(math.isfinite(v) and v > 0 for v in (entry, stop_loss, equity_jpy, RISK_PER_TRADE_PCT)):
+            raise ValueError()
+        min_size, max_size, step = (float(rule[k]) for k in ("minOpenOrderSize", "maxOrderSize", "sizeStep"))
+        if not all(math.isfinite(v) and v > 0 for v in (min_size, max_size, step)) or min_size > max_size:
+            raise ValueError()
+    except (KeyError, ValueError, TypeError):
+        return SizePlan(False, 0, None, None, "価格・資金・注文数量ルールが不正または不足")
+    distance = abs(entry - stop_loss)
     if distance <= 0:
         return SizePlan(False, 0, None, None, "EntryとSLが同値")
     conv = quote_to_jpy_rate(symbol, ticker)
@@ -68,11 +85,8 @@ def calculate_size(
     loss_per_unit_jpy = distance * conv
     raw_size = allowed_loss / loss_per_unit_jpy
 
-    min_size = float(rule.get("minOpenOrderSize", 0) or 0)
-    max_size = float(rule.get("maxOrderSize", raw_size) or raw_size)
-    step = float(rule.get("sizeStep", 1) or 1)
-    if step <= 0:
-        step = 1
+    if not all(math.isfinite(v) and v > 0 for v in (allowed_loss, loss_per_unit_jpy, raw_size)):
+        return SizePlan(False, 0, None, None, "リスク計算値が不正")
     size = math.floor(min(raw_size, max_size) / step) * step
 
     if size < min_size:
@@ -96,7 +110,7 @@ def margin_ok(assets: dict[str, Any] | None) -> tuple[bool, str | None]:
         ratio = float(assets.get("marginRatio"))
     except (TypeError, ValueError):
         return False, "証拠金維持率を取得できない"
-    if ratio < MIN_MARGIN_RATIO:
+    if not math.isfinite(ratio) or ratio < MIN_MARGIN_RATIO:
         return False, f"証拠金維持率 {ratio:.1f}% < {MIN_MARGIN_RATIO:.0f}%"
     return True, None
 
@@ -136,12 +150,14 @@ def projected_currency_risk_units(
 
 def exposure_risk_ok(projected: dict[str, float]) -> tuple[bool, str | None]:
     for currency, units in projected.items():
-        if abs(units) > MAX_CURRENCY_EXPOSURE_RISK:
+        if not math.isfinite(units) or abs(units) > MAX_CURRENCY_EXPOSURE_RISK:
             return False, f"{currency}方向の集中リスク {units:+.2f}% が上限を超過"
     return True, None
 
 
 def total_risk_ok(current_risk_pct: float, new_risk_pct: float) -> tuple[bool, str | None]:
+    if not all(math.isfinite(v) and v >= 0 for v in (current_risk_pct, new_risk_pct)):
+        return False, "口座リスク計算値が不正"
     total = current_risk_pct + new_risk_pct
     if total > MAX_TOTAL_RISK_PCT:
         return False, f"口座合計リスク {total:.2f}% が上限 {MAX_TOTAL_RISK_PCT:.2f}% を超過"

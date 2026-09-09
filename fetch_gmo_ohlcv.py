@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import math
 import time
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -53,6 +54,10 @@ def _rows_to_df(rows: list[dict], interval: str, now: datetime) -> pd.DataFrame:
         df[col] = pd.to_numeric(df[col], errors="coerce")
     df["Volume"] = 0.0
     df = df.dropna(subset=["OpenTime", "Open", "High", "Low", "Close"])
+    prices = df[["Open", "High", "Low", "Close"]]
+    valid = prices.apply(lambda col: col.map(lambda v: math.isfinite(v) and v > 0)).all(axis=1)
+    valid &= (df["High"] >= prices.max(axis=1)) & (df["Low"] <= prices.min(axis=1))
+    df = df[valid]
 
     # 形成中の足を除外。OpenTime + timeframe <= now の完成足だけを使う。
     now_naive = now.astimezone(JST).replace(tzinfo=None)
@@ -133,12 +138,13 @@ def main(csv_file: str):
 
     status = client.service_status()
     if status != "OPEN":
-        raise SystemExit(f"GMO FX service status={status}; 市場データ生成を停止")
+        print(f"GMO FX service status={status}; 市場データ生成を停止")
+        raise SystemExit(0)
 
     rules = client.symbols()
     unsupported = [s for s in symbols if s not in rules]
     if unsupported:
-        raise SystemExit(f"GMO FX未対応symbol: {unsupported}")
+        raise ValueError(f"GMO FX未対応symbol: {unsupported}")
 
     for symbol in symbols:
         print(f"\n=== Fetching {symbol} ===")

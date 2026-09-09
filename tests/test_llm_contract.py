@@ -52,6 +52,7 @@ class LLMContractTests(unittest.TestCase):
         client = _Client()
         item = {
             "symbol":"USD_JPY","bid":149.99,"ask":150.0,
+            "quote_time": "2026-09-09T00:00:00Z",
             "ai_input":{"tf":{"15m":{"f":{"atr":0.2}},"1h":{"f":{}},"4h":{"f":{}}}},
         }
         with patch.object(analyze_ohlcv, "_client", return_value=client):
@@ -62,6 +63,7 @@ class LLMContractTests(unittest.TestCase):
         self.assertEqual(valid["USD_JPY"]["trend_invalidation"], 149.5)
         self.assertEqual(valid["USD_JPY"]["stop_loss"], 149.5)
         kwargs = client.responses.kwargs
+        self.assertEqual(json.loads(kwargs["input"])["markets"][0]["quote_time"], item["quote_time"])
         self.assertEqual(kwargs["model"], "gpt-5.6-luna")
         self.assertEqual(kwargs["reasoning"]["context"], "current_turn")
         self.assertEqual(kwargs["text"]["format"]["type"], "json_schema")
@@ -74,7 +76,8 @@ class LLMContractTests(unittest.TestCase):
         self.assertIn("trend_invalidation", props)
         self.assertIn("entry_plan", props)
         self.assertIn("PULLBACK_LIMIT", props["entry_plan"]["enum"])
-        self.assertIn("押し目/戻り", kwargs["instructions"])
+        self.assertIn("押し目買い", kwargs["instructions"])
+        self.assertIn("戻り売り", kwargs["instructions"])
 
     def test_pullback_plan_semantics(self):
         item = {

@@ -129,10 +129,12 @@ class GMOClient:
             try:
                 next_prev = min(int(x[id_field]) for x in page if x.get(id_field) is not None)
             except (ValueError, TypeError):
-                break
+                raise GMOAPIError(f"Incomplete pagination: {path} invalid cursor")
             if prev_id == next_prev:
-                break
+                raise GMOAPIError(f"Incomplete pagination: {path} repeated cursor")
             prev_id = next_prev
+        else:
+            raise GMOAPIError(f"Incomplete pagination: {path} exceeded {max_pages} pages")
         return rows
 
     def active_orders(self) -> list[dict[str, Any]]:
@@ -156,6 +158,7 @@ def parse_api_timestamp(value: str | None) -> datetime | None:
     if not value:
         return None
     try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(timezone.utc)
-    except ValueError:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return parsed.astimezone(timezone.utc) if parsed.tzinfo is not None else None
+    except (ValueError, TypeError, AttributeError):
         return None

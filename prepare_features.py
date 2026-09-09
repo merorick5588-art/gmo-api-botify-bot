@@ -64,6 +64,7 @@ def summarize(df: pd.DataFrame, timeframe: str | None = None) -> dict:
 
     # 絶対値より価格桁に依存しにくい正規化特徴を優先する。
     result = {
+        "close": round(close, 7),
         "reg": derive_regime(df),
         "rsi": round(_safe(last["RSI_14"], 50), 2),
         "adx": round(_safe(last.get("ADX_14")), 2),
@@ -84,6 +85,24 @@ def summarize(df: pd.DataFrame, timeframe: str | None = None) -> dict:
         "last": round(_safe(returns.iloc[-1]) * 100, 4) if not returns.empty else 0,
         "atr": round(atr, 7),
     }
+
+    # 最新足を含むh20/l20だけでは「直前レンジの外で引けたか」を判別できない。
+    # 比較対象を最新足より前に限定し、未来の足を参照しない。
+    if len(df) >= 21:
+        prior = df.iloc[-21:-1]
+        result["break_high20"] = round((close - float(prior["High"].max())) / atr, 3)
+        result["break_low20"] = round((float(prior["Low"].min()) - close) / atr, 3)
+    for bars in (4, 12):
+        if len(df) > bars:
+            result[f"move{bars}"] = round((close - float(df["Close"].iloc[-1-bars])) / atr, 3)
+    if len(df) >= 4:
+        prev = df.iloc[-4]
+        for key, value in {
+            "rsi_d3": float(last["RSI_14"]) - float(prev["RSI_14"]),
+            "mh_d3": ((macd - macd_signal) - (float(prev["MACD"]) - float(prev["MACD_signal"]))) / atr,
+        }.items():
+            if math.isfinite(value):
+                result[key] = round(value, 3)
 
     # 320本履歴を古いローソク足の羅列ではなく、長期文脈へ圧縮する。
     # 15mでも「現在が過去数日比で高ボラか」「直線的か往復か」はEntry timingに有用。
@@ -170,6 +189,13 @@ def prepare_ai_input(symbols_csv: str):
                 "f": summarize(df, label),
                 "c": recent_ohlc(df),
             }
+            if "OpenTime" in df:
+                opened = pd.Timestamp(df["OpenTime"].iloc[-1])
+                if not pd.isna(opened):
+                    if opened.tzinfo is None:
+                        opened = opened.tz_localize("Asia/Tokyo")
+                    minutes = {"15m": 15, "1h": 60, "4h": 240, "1d": 1440}[label]
+                    result["tf"][label]["close_time"] = (opened + pd.Timedelta(minutes=minutes)).tz_convert("UTC").isoformat()
         if not complete:
             print(f"Skip AI input {symbol}: timeframe不足")
             continue

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import math
+from datetime import datetime
+
 from bot_config import MAX_SPREAD_ATR_RATIO
 
 
@@ -14,12 +17,30 @@ def _feat(ai_input: dict, tf: str, key: str, default=0.0):
         return default
 
 
-def stage1_filter(ai_input: dict, bid: float, ask: float) -> dict:
+def stage1_filter(ai_input: dict, bid: float, ask: float, quote_time: str | None = None) -> dict:
     reasons: list[str] = []
     warnings: list[str] = []
     reg4 = _reg(ai_input, "4h")
     reg1 = _reg(ai_input, "1h")
     reg15 = _reg(ai_input, "15m")
+
+    if not all(math.isfinite(float(v)) and float(v) > 0 for v in (bid, ask)) or float(bid) > float(ask):
+        reasons.append("Bid/Askが不正")
+    if quote_time is not None:
+        try:
+            quote = datetime.fromisoformat(quote_time.replace("Z", "+00:00"))
+            if quote.tzinfo is None:
+                raise ValueError("quote timezone missing")
+            for tf, minutes in (("15m", 15), ("1h", 60)):
+                closed = datetime.fromisoformat(ai_input.get("tf", {}).get(tf, {}).get("close_time", "").replace("Z", "+00:00"))
+                if closed.tzinfo is None:
+                    raise ValueError("candle timezone missing")
+                age = (quote - closed).total_seconds()
+                # 最新完成足の遅延を1本分許容。休日明け等も古い短期足で推奨しない。
+                if age < 0 or age > minutes * 120 + 180:
+                    reasons.append(f"{tf}完成足が古い、またはquoteより未来")
+        except (ValueError, TypeError, AttributeError):
+            reasons.append("短期足の時刻不足: 入力を再生成")
 
     if reg4 not in {"TREND_UP", "TREND_DOWN"}:
         reasons.append(f"4hレジーム={reg4 or 'UNKNOWN'}")
@@ -35,7 +56,7 @@ def stage1_filter(ai_input: dict, bid: float, ask: float) -> dict:
 
     atr15 = _feat(ai_input, "15m", "atr", 0)
     spread = max(0.0, float(ask) - float(bid))
-    if atr15 <= 0:
+    if not math.isfinite(atr15) or atr15 <= 0:
         reasons.append("15m ATRを取得できない")
     elif spread / atr15 > MAX_SPREAD_ATR_RATIO:
         reasons.append(f"スプレッド/15mATR={spread/atr15:.2f} が過大")
