@@ -58,6 +58,7 @@ MAX_TICKER_AGE_SECONDS = _int("MAX_TICKER_AGE_SECONDS", 180)
 
 # データ量。未確定足を除外した完成足をこの程度確保する。
 OHLC_TARGET_BARS = _int("OHLC_TARGET_BARS", 320)
+OHLC_MAX_YEARS = _int("OHLC_MAX_YEARS", 5)
 OHLC_MAX_DAYS = _int("OHLC_MAX_DAYS", 45)
 
 # 実約定同期。latestExecutionsは銘柄単位なので頻度を抑える。

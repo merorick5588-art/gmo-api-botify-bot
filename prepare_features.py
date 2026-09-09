@@ -87,7 +87,7 @@ def summarize(df: pd.DataFrame, timeframe: str | None = None) -> dict:
 
     # 320本履歴を古いローソク足の羅列ではなく、長期文脈へ圧縮する。
     # 15mでも「現在が過去数日比で高ボラか」「直線的か往復か」はEntry timingに有用。
-    if len(df) >= 200:
+    if len(df) >= 100:
         r100 = df.tail(100)
         h100 = _safe(r100["High"].max(), close)
         l100 = _safe(r100["Low"].min(), close)
@@ -113,20 +113,29 @@ def summarize(df: pd.DataFrame, timeframe: str | None = None) -> dict:
             "p50": round(above50, 3),
         })
 
-    # 1h/4h/日足ではさらにSMA100/200と250本構造を使う。
-    if timeframe in {"1h", "4h", "1d"} and len(df) >= 250:
+    # 1h/4h/日足の長期特徴は、利用可能な履歴長に応じて段階的に追加する。
+    # 新規取扱銘柄の日足でSMA200/250本高安を捏造せず、計算できる特徴だけを使う。
+    if timeframe in {"1h", "4h", "1d"} and len(df) >= 110:
         sma100 = _safe(last.get("SMA_100"), close)
+        sma100_prev = _safe(df["SMA_100"].iloc[-11], sma100)
+        result.update({
+            "s100": round((close - sma100) / atr, 3),
+            "sl100": round((sma100 - sma100_prev) / atr, 3),
+        })
+
+    if timeframe in {"1h", "4h", "1d"} and len(df) >= 210:
         sma200 = _safe(last.get("SMA_200"), close)
-        sma100_prev = _safe(df["SMA_100"].iloc[-11], sma100) if len(df) >= 11 else sma100
-        sma200_prev = _safe(df["SMA_200"].iloc[-11], sma200) if len(df) >= 11 else sma200
+        sma200_prev = _safe(df["SMA_200"].iloc[-11], sma200)
+        result.update({
+            "s200": round((close - sma200) / atr, 3),
+            "sl200": round((sma200 - sma200_prev) / atr, 3),
+        })
+
+    if timeframe in {"1h", "4h", "1d"} and len(df) >= 250:
         r250 = df.tail(250)
         h250 = _safe(r250["High"].max(), close)
         l250 = _safe(r250["Low"].min(), close)
         result.update({
-            "s100": round((close - sma100) / atr, 3),
-            "s200": round((close - sma200) / atr, 3),
-            "sl100": round((sma100 - sma100_prev) / atr, 3),
-            "sl200": round((sma200 - sma200_prev) / atr, 3),
             "h250": round((h250 - close) / atr, 3),
             "l250": round((close - l250) / atr, 3),
         })
@@ -152,10 +161,15 @@ def prepare_ai_input(symbols_csv: str):
                 complete = False
                 break
             df = pd.read_csv(path)
-            if len(df) < 260:
+            min_bars = 100 if label == "1d" else 260
+            if len(df) < min_bars:
                 complete = False
                 break
-            result["tf"][label] = {"f": summarize(df, label), "c": recent_ohlc(df)}
+            result["tf"][label] = {
+                "n": int(len(df)),
+                "f": summarize(df, label),
+                "c": recent_ohlc(df),
+            }
         if not complete:
             print(f"Skip AI input {symbol}: timeframe不足")
             continue

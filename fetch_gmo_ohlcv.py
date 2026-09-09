@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 
-from bot_config import MAX_TICKER_AGE_SECONDS, OHLC_MAX_DAYS, OHLC_TARGET_BARS
+from bot_config import MAX_TICKER_AGE_SECONDS, OHLC_MAX_DAYS, OHLC_MAX_YEARS, OHLC_TARGET_BARS
 from gmo_client import GMOClient, parse_api_timestamp
 from symbol_config import load_symbols
 
@@ -64,8 +64,11 @@ def _rows_to_df(rows: list[dict], interval: str, now: datetime) -> pd.DataFrame:
 def fetch_ohlcv(client: GMOClient, symbol: str, interval: str, now: datetime) -> pd.DataFrame:
     chunks: list[pd.DataFrame] = []
     if interval in {"4hour", "1day"}:
-        # 4h/日足は年単位。長期特徴量用に必要本数まで前年へ遡る。
-        for year in (now.year, now.year - 1):
+        # 4h/日足は年単位。年初でも必要本数を確保できるよう、上限年数まで遡る。
+        # 新規取扱銘柄は上場前の年が404になるため、既に当年データを取得済みなら
+        # その404を「履歴の開始点」とみなし、それ以前への無意味な問い合わせを止める。
+        for years_back in range(OHLC_MAX_YEARS):
+            year = now.year - years_back
             try:
                 rows = client.klines(symbol, interval, str(year), "BID")
                 chunk = _rows_to_df(rows, interval, now)
@@ -74,6 +77,13 @@ def fetch_ohlcv(client: GMOClient, symbol: str, interval: str, now: datetime) ->
                 if sum(len(c) for c in chunks) >= OHLC_TARGET_BARS:
                     break
             except Exception as exc:
+                is_404 = "404" in str(exc)
+                if is_404 and chunks:
+                    print(
+                        f"FX {symbol} {interval}: history unavailable before year={year + 1} "
+                        f"(year={year} returned 404); using available bars"
+                    )
+                    break
                 print(f"FX {symbol} {interval} fetch error year={year}: {exc}")
             time.sleep(0.15)
     else:
@@ -134,12 +144,21 @@ def main(csv_file: str):
         print(f"\n=== Fetching {symbol} ===")
         for interval in ("15min", "1hour", "4hour", "1day"):
             df = fetch_ohlcv(client, symbol, interval, now)
-            if len(df) < 260:
-                print(f"Insufficient data for {symbol} {interval}: {len(df)} bars")
+            # 4〜12h予測の主軸(15m/1h/4h)は従来どおり260本必須。
+            # 1dayは長期背景なので、新規取扱銘柄でも100本以上あれば部分利用する。
+            min_bars = 100 if interval == "1day" else 260
+            if len(df) < min_bars:
+                print(f"Insufficient data for {symbol} {interval}: {len(df)} bars (min={min_bars})")
                 continue
             out_name = f"{symbol}_{interval}_forex.csv"
             df.to_csv(out_name, index=False)
-            print(f"Saved {out_name}: {len(df)} completed bars")
+            if len(df) < OHLC_TARGET_BARS:
+                print(
+                    f"Saved {out_name}: {len(df)} completed bars "
+                    f"(partial history; target={OHLC_TARGET_BARS})"
+                )
+            else:
+                print(f"Saved {out_name}: {len(df)} completed bars")
 
     # KLine取得後にtickerを取得し直し、Entry基準のBid/Askを可能な限り新鮮にする。
     ticker = client.ticker()
