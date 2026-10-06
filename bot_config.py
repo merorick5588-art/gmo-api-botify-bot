@@ -41,7 +41,7 @@ MAX_SPREAD_ATR_RATIO = _float("MAX_SPREAD_ATR_RATIO", 0.12)
 ENTRY_SCORE_THRESHOLD = _float("ENTRY_SCORE_THRESHOLD", 0.65)
 ENTRY_QUALITY_THRESHOLD = _float("ENTRY_QUALITY_THRESHOLD", 0.68)
 
-# 重要指標ガード（ニュース要約は行わない）
+# 重要指標ガード
 EVENT_PRE_MINUTES = _int("EVENT_PRE_MINUTES", 60)
 # 「警告」と「直前」を別通知にする。既存cronが30分刻みでも拾いやすい初期値。
 EVENT_IMMINENT_MINUTES = _int("EVENT_IMMINENT_MINUTES", 30)
@@ -73,6 +73,10 @@ STATE_DB = Path(os.getenv("BOT_STATE_DB", str(STATE_DIR / "fxbot.sqlite3")))
 CALENDAR_CACHE_PATH = Path(
     os.getenv("CALENDAR_CACHE_PATH", str(STATE_DIR / "ff_calendar_cache.json"))
 )
+NEWS_CACHE_PATH = STATE_DIR / "market_news_cache.json"
+NEWS_MAX_AGE_HOURS = max(1, _int("NEWS_MAX_AGE_HOURS", 24))
+NEWS_CACHE_MAX_AGE_MINUTES = max(1, _int("NEWS_CACHE_MAX_AGE_MINUTES", 30))
+NEWS_MAX_ITEMS_PER_SYMBOL = min(8, max(1, _int("NEWS_MAX_ITEMS_PER_SYMBOL", 5)))
 
 # Discord
 DISCORD_FOREX_MAIN = os.getenv("DISCORD_FOREX_MAIN")

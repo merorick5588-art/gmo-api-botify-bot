@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.env
+state/
+*_forex.csv
+*_features.csv
+*_latest_rates.csv
+*_ai_input.json

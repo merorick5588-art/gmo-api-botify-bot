@@ -338,7 +338,7 @@ class CoreTests(unittest.TestCase):
 
     def test_actionable_position_management_goes_main(self):
         state = {"kind": "position"}
-        self.assertFalse(_management_requires_main(state, {"action": "HOLD"}))
+        self.assertTrue(_management_requires_main(state, {"action": "HOLD"}))
         for action in ("CLOSE", "TAKE_PARTIAL", "TIGHTEN_SL", "REVIEW_MANUALLY"):
             self.assertTrue(_management_requires_main(state, {"action": action}), action)
 

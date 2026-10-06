@@ -110,7 +110,14 @@ class GMOClient:
         return data or []
 
     def assets(self) -> dict[str, Any]:
-        return self._private_get("/v1/account/assets") or {}
+        data = self._private_get("/v1/account/assets")
+        if isinstance(data, list):
+            if len(data) != 1 or not isinstance(data[0], dict):
+                raise GMOAPIError("Invalid account assets response")
+            data = data[0]
+        if not isinstance(data, dict) or not data:
+            raise GMOAPIError("Invalid account assets response")
+        return data
 
     def _paginate_private(self, path: str, id_field: str, max_pages: int = 20) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []

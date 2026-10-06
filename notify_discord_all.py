@@ -52,6 +52,7 @@ from risk_engine import (
 from state_db import StateDB
 from symbol_config import load_symbols, split_symbol
 from virtual_tracker import update_virtual_trades
+from market_news import fetch_market_news, context_for_symbol
 
 JST = ZoneInfo("Asia/Tokyo")
 
@@ -342,6 +343,15 @@ def _management_context(
         ctx["position_count"] = int(state.get("position_count") or 1)
     return ctx
 
+def _released_market_events(symbol: str, events: list, now: datetime) -> list[dict]:
+    currencies = {*split_symbol(symbol), "ALL"}
+    return [{"title": e.title, "currency": e.currency, "at": e.at.isoformat(),
+             "actual": e.actual, "forecast": e.forecast, "previous": e.previous}
+            for e in sorted(events, key=lambda e: e.at, reverse=True)
+            if e.currency in currencies and e.impact == "High" and e.actual is not None
+            and now - timedelta(hours=12) <= e.at <= now][:6]
+
+
 def _event_embed(event, now: datetime, released: bool, run_timestamp: str) -> dict:
     local = event.at.astimezone(JST)
     if released:
@@ -384,25 +394,44 @@ def _entry_embed(decision: dict, rate: dict, account: dict | None, run_timestamp
     icon = "📈" if buy else "📉"
     invalidation = decision.get("trend_invalidation", decision.get("stop_loss"))
     fields = [
-        {"name": "4〜12h予測 / Entry品質", "value": f"{decision['direction'].upper()}  score {abs(decision['trend_score']):.2f}\nEntry quality {decision['entry_quality']:.2f}", "inline": True},
         {"name": "推奨注文 / 約定値", "value": f"{_entry_plan_label(decision.get('entry_plan'), decision['direction'])}\n{_fmt_price(decision['entry'], tick)}", "inline": True},
         {"name": "トレンド崩壊逆指値 / 利確", "value": f"逆指値 {_fmt_price(invalidation, tick)}\nTP {_fmt_price(decision['take_profit'], tick)}\nRR {decision['rr']:.2f}", "inline": True},
         {"name": "推奨数量", "value": f"{decision.get('suggested_size', 0):,.0f} 通貨\n想定損失 ¥{decision.get('estimated_loss_jpy', 0):,.0f}", "inline": True},
-        {"name": "4h regime", "value": str(decision.get("regime", "-")), "inline": True},
-        {"name": "理由", "value": decision.get("reason") or "-", "inline": False},
+        _market_material_field(decision.get("market_context", {}), decision),
     ]
-    if account:
-        fields.append({
-            "name": "口座", "value": f"Equity ¥{float(account.get('equity', 0)):,.0f}\nMargin ratio {float(account.get('marginRatio', 0)):.1f}%", "inline": True
-        })
-    return {"title": f"{icon} NEW ENTRY候補 — {decision['symbol']}", "color": 3066993, "fields": fields, "footer": _footer(run_timestamp)}
+    return {"title": f"{icon} {decision['symbol']} {decision['direction'].upper()}（4〜12h）",
+            "description": str(decision.get("reason") or "-")[:180],
+            "color": 3066993, "fields": fields, "footer": _footer(run_timestamp)}
+
+
+def _market_material_field(context: dict, result: dict) -> dict:
+    sources = context.get("sources", [])
+    failed = sum(s.get("status") == "unavailable" for s in sources)
+    cached = sum(s.get("status") == "cache" for s in sources)
+    rows = context.get("headlines", [])
+    refs = set(result.get("news_refs") or [])
+    selected = [r for r in rows if r["id"] in refs][:2]
+    if selected:
+        lines = []
+        for row in selected:
+            stamp = datetime.fromisoformat(row["published_at"]).astimezone(JST)
+            title = row["title"].replace("[", "").replace("]", "")[:45]
+            lines.append(f"[{row['source']} {stamp:%m/%d %H:%M} {title}]({row['url']})")
+        value = "\n".join(lines)
+    else:
+        value = f"取得材料{len(rows)}件・参照記事なし"
+    if not sources or failed:
+        value += "\nニュース取得不足"
+    elif cached:
+        value += "\n一部キャッシュ使用"
+    return {"name": "市場材料", "value": value[:1024], "inline": False}
 
 
 def _management_requires_main(state: dict, result: dict) -> bool:
-    """人が売買/注文変更/手動確認を行う必要がある管理判断だけMAINへ送る。"""
+    """保有継続を含む建玉判断と、注文変更/手動確認をMAINへ送る。"""
     action = str(result.get("action") or "").upper()
     if state.get("kind") == "position":
-        return action in {"CLOSE", "TAKE_PARTIAL", "TIGHTEN_SL", "REVIEW_MANUALLY"}
+        return action in {"HOLD", "CLOSE", "TAKE_PARTIAL", "TIGHTEN_SL", "REVIEW_MANUALLY"}
     if state.get("kind") == "order":
         return action in {"CANCEL_ORDER", "REPRICE_ORDER", "REVIEW_MANUALLY"}
     return action not in {"", "HOLD", "KEEP_ORDER"}
@@ -411,8 +440,12 @@ def _management_requires_main(state: dict, result: dict) -> bool:
 def _management_embed(symbol: str, state: dict, result: dict, rate: dict, run_timestamp: str) -> dict:
     fields = [
         {"name": "状態", "value": state["kind"].upper(), "inline": True},
-        {"name": "判断", "value": str(result.get("action")), "inline": True},
-        {"name": "Confidence", "value": f"{float(result.get('confidence', 0)):.2f}", "inline": True},
+        {"name": "判断", "value": {
+            "HOLD": "保有継続（HOLD）", "CLOSE": "決済推奨（CLOSE）",
+            "TAKE_PARTIAL": "部分利確（TAKE_PARTIAL）",
+            "TIGHTEN_SL": "逆指値引き締め（TIGHTEN_SL）",
+            "REVIEW_MANUALLY": "手動確認（REVIEW_MANUALLY）",
+        }.get(result.get("action"), str(result.get("action"))), "inline": True},
     ]
     tick = rate.get("tickSize")
     if state.get("kind") == "order":
@@ -431,11 +464,12 @@ def _management_embed(symbol: str, state: dict, result: dict, rate: dict, run_ti
         fields.append({"name": "現在逆指値 / トレンド崩壊", "value": f"現在 {current_stop_text}\n崩壊 {_fmt_price(float(invalidation), tick) if invalidation is not None else '-'}", "inline": True})
     if result.get("take_partial_pct") is not None:
         fields.append({"name": "部分利確", "value": f"{float(result['take_partial_pct']):.0f}%", "inline": True})
-    fields.append({"name": "理由", "value": str(result.get("reason") or "-"), "inline": False})
-    urgent = _management_requires_main(state, result)
+    fields.append(_market_material_field(state.get("market_context", {}), result))
+    urgent = str(result.get("action") or "").upper() not in {"HOLD", "KEEP_ORDER"}
     return {
         "title": f"{'🛡' if not urgent else '⚠'} POSITION/ORDER — {symbol}",
         "color": 3447003 if not urgent else 16753920,
+        "description": str(result.get("reason") or "-")[:180],
         "fields": fields,
         "footer": _footer(run_timestamp),
     }
@@ -448,6 +482,18 @@ def _manual_embed(item: dict, run_timestamp: str) -> dict:
         "description": item["reason"],
         "footer": _footer(run_timestamp),
     }
+
+
+def _notify_management_unavailable(db: StateDB, state: dict, reason: str, run_timestamp: str) -> None:
+    symbol = state["symbol"]
+    db.save_decision({
+        "symbol": symbol, "decision_type": "MANAGEMENT",
+        "action": "REVIEW_MANUALLY", "reason": reason,
+    })
+    embed = _manual_embed({"symbol": symbol, "reason": reason}, run_timestamp)
+    send_discord(embed, DISCORD_FOREX_OTHER)
+    _send_dedup(db, f"mgmt-unavailable:{symbol}:{reason}", SIGNAL_DEDUP_MINUTES,
+                embed, DISCORD_FOREX_MAIN)
 
 
 def _validate_management_result(state: dict, result: dict, rate: dict) -> dict:
@@ -619,6 +665,7 @@ def run(symbols_file: str = "symbols.csv", model: str = DEFAULT_MODEL) -> None:
 
     # 無料・認証不要の経済カレンダー。ニュース本文や有料APIは使わない。
     events, calendar_status = fetch_calendar(now)
+    news_snapshot = fetch_market_news()
     currencies = {c for s in symbols for c in split_symbol(s)}
     if calendar_status["usable"]:
         for event in relevant_high_impact_events(events, currencies, now):
@@ -651,6 +698,11 @@ def run(symbols_file: str = "symbols.csv", model: str = DEFAULT_MODEL) -> None:
     assets, orders, positions, summaries, private_error = _account_snapshot(client)
     if private_error:
         print(f"private API unavailable: {private_error}")
+        _send_dedup(
+            db, "management:account-unavailable", SIGNAL_DEDUP_MINUTES,
+            _manual_embed({"symbol": "口座", "reason": "口座・建玉情報を取得できず、保有継続/決済の判断ができません。手動で確認してください。"}, run_timestamp),
+            DISCORD_FOREX_MAIN,
+        )
     elif assets:
         # 年間収支/DDの検証用。参照値を保存するだけで売買判断には直接使わない。
         db.save_account_snapshot(assets, now.isoformat())
@@ -672,6 +724,8 @@ def run(symbols_file: str = "symbols.csv", model: str = DEFAULT_MODEL) -> None:
         symbol = state["symbol"]
         loaded = market.get(symbol)
         if not loaded:
+            _notify_management_unavailable(
+                db, state, "市場データ不足のため保有/注文管理を判断できません。手動で確認してください。", run_timestamp)
             continue
         ai, rate = loaded
         item = {
@@ -680,6 +734,8 @@ def run(symbols_file: str = "symbols.csv", model: str = DEFAULT_MODEL) -> None:
             "ask": rate["ask"],
             "tf": ai.get("tf", {}),
             "ctx": _management_context(state, ai, rate, events if calendar_status["usable"] else [], now, db),
+            "market_context": context_for_symbol(news_snapshot, symbol),
+            "released_events": _released_market_events(symbol, events, now) if calendar_status["usable"] else [],
         }
         mgmt_items.append(item)
         mgmt_state_map[symbol] = state
@@ -688,6 +744,8 @@ def run(symbols_file: str = "symbols.csv", model: str = DEFAULT_MODEL) -> None:
         symbol = item["symbol"]
         result = mgmt_results.get(symbol)
         if not result:
+            _notify_management_unavailable(
+                db, mgmt_state_map[symbol], "AI管理判断を取得できません。保有/注文状態を手動で確認してください。", run_timestamp)
             continue
         state = mgmt_state_map[symbol]
         rate = market[symbol][1]
@@ -697,12 +755,16 @@ def run(symbols_file: str = "symbols.csv", model: str = DEFAULT_MODEL) -> None:
             "action": result.get("action"), "reason": result.get("reason"),
             "regime": market[symbol][0].get("tf", {}).get("4h", {}).get("f", {}).get("reg"),
             "management": result,
+            "market_context": item["market_context"],
+            "released_events": item["released_events"],
         }
         db.save_decision(decision)
-        embed = _management_embed(symbol, state, result, rate, run_timestamp)
+        embed = _management_embed(symbol, item, result, rate, run_timestamp)
         send_discord(embed, DISCORD_FOREX_OTHER)
         if _management_requires_main(state, result):
-            key = f"mgmt:{symbol}:{result.get('action')}:{result.get('trend_invalidation')}:{result.get('recommended_order_price')}"
+            # HOLDの水準が微動しても通知間隔をリセットしない。
+            key = (f"mgmt:{symbol}:HOLD" if result.get("action") == "HOLD" else
+                   f"mgmt:{symbol}:{result.get('action')}:{result.get('trend_invalidation')}:{result.get('recommended_order_price')}")
             _send_dedup(db, key, SIGNAL_DEDUP_MINUTES, embed, DISCORD_FOREX_MAIN)
 
     # --- 新規Entry ---
@@ -757,11 +819,13 @@ def run(symbols_file: str = "symbols.csv", model: str = DEFAULT_MODEL) -> None:
         if reasons:
             pre_reasons[symbol] = reasons
             continue
-        scheduled = [{"title": e.title, "currency": e.currency, "at": e.at.isoformat()}
+        scheduled = [{"title": e.title, "currency": e.currency, "at": e.at.isoformat(), "forecast": e.forecast, "previous": e.previous}
                      for e in events if e.impact == "High" and
                      e.currency in {*split_symbol(symbol), "ALL"} and
                      now <= e.at <= now + timedelta(hours=12)]
-        eligible.append({"symbol": symbol, "ai_input": ai, "bid": rate["bid"], "ask": rate["ask"], "quote_time": rate.get("timestamp"), "events": scheduled})
+        eligible.append({"symbol": symbol, "ai_input": ai, "bid": rate["bid"], "ask": rate["ask"], "quote_time": rate.get("timestamp"), "events": scheduled,
+                         "market_context": context_for_symbol(news_snapshot, symbol),
+                         "released_events": _released_market_events(symbol, events, now) if calendar_status["usable"] else []})
 
     for symbol, reasons in pre_reasons.items():
         print(f"Entry Stage1 skip {symbol}: " + " / ".join(reasons))
@@ -832,6 +896,7 @@ def run(symbols_file: str = "symbols.csv", model: str = DEFAULT_MODEL) -> None:
             "warnings": post_warnings,
             "spread": spread,
             "entry_mode": entry_mode,
+            "market_context": item["market_context"],
         }
 
         reject: list[str] = []

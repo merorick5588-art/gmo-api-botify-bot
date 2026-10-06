@@ -111,6 +111,7 @@ class ForecastAuditTests(unittest.TestCase):
                 "load_symbols": ["USD_JPY"], "update_virtual_trades": [],
                 "_load_market_input": (ai, {"bid": 150, "ask": 150.01}),
                 "fetch_calendar": ([event], {"usable": True}),
+                "fetch_market_news": {"retrieved_at": now.isoformat(), "sources": [], "headlines": []},
                 "relevant_high_impact_events": [], "newly_released_events": [],
                 "_account_snapshot": (None, [], [], [], None),
                 "_sync_executions": None, "margin_ok": (True, None),
@@ -134,4 +135,6 @@ class ForecastAuditTests(unittest.TestCase):
         sent = analysis.call_args.args[0][0]
         self.assertEqual(sent["bid"], 151)
         self.assertEqual(sent["events"][0]["title"], "CPI")
+        self.assertIn("market_context", sent)
+        self.assertEqual(json.loads(self.rows()[0]["input_json"])["market_context"]["retrieved_at"], now.isoformat())
         self.assertEqual(self.rows()[0]["plan"], "NO_TRADE")
