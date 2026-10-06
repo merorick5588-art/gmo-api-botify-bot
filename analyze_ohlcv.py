@@ -40,14 +40,6 @@ ENTRY_RESULT_SCHEMA = {
     ],
     "additionalProperties": False,
 }
-ENTRY_BATCH_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "results": {"type": "array", "minItems": 1, "maxItems": 30, "items": ENTRY_RESULT_SCHEMA}
-    },
-    "required": ["results"],
-    "additionalProperties": False,
-}
 
 NULL_NUMBER = {"anyOf": [{"type": "number"}, {"type": "null"}]}
 MGMT_RESULT_SCHEMA = {
@@ -74,14 +66,31 @@ MGMT_RESULT_SCHEMA = {
     ],
     "additionalProperties": False,
 }
-MGMT_BATCH_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "results": {"type": "array", "minItems": 1, "maxItems": 30, "items": MGMT_RESULT_SCHEMA}
-    },
-    "required": ["results"],
-    "additionalProperties": False,
-}
+def _batch_result_schema(result_schema: dict, items: list[dict]) -> dict:
+    """要求した銘柄ごとに1つの回答欄を固定し、重複・欠落を防ぐ。"""
+    symbols = [item["symbol"] for item in items]
+    if not symbols or len(symbols) != len(set(symbols)):
+        raise ValueError("empty or duplicate request symbols")
+    row_schema = dict(result_schema,
+        properties={k: v for k, v in result_schema["properties"].items() if k != "symbol"},
+        required=[k for k in result_schema["required"] if k != "symbol"])
+    return {
+        "type": "object",
+        "properties": {"results": {
+            "type": "object", "properties": {s: row_schema for s in symbols},
+            "required": symbols, "additionalProperties": False,
+        }},
+        "required": ["results"], "additionalProperties": False,
+    }
+
+
+def _unique_json_object(pairs: list[tuple]) -> dict:
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON key: {key}")
+        result[key] = value
+    return result
 
 FEATURE_LEGEND = """tf.*はBID完成足。1d=長期背景、4h=大局、1h=方向/構造、15m=タイミング。f.closeが価格基準、atr=ATR14、close_timeは足の終了UTC、n=本数、c=古い順[O,H,L,C]。
 reg=レジーム,rsi=RSI14,adx=強さ,pdi/mdi=DI,s20/s50/s100/s200=(close-SMA)/ATR,sl20/sl50=5本SMA変化/ATR,sl100/sl200=10本変化/ATR,macd=MACD/ATR,mh=ヒストグラム/ATR。
@@ -101,7 +110,7 @@ ENTER_NOWはBUY=Ask/SELL=Bid。PULLBACK_LIMITはBUY=Ask未満の押し目買い�
 trend_invalidationは1h/4hの構造崩壊水準を先に定め、take_profitは現実的な4〜12h目標。RR>={MIN_RR:.2f}を満たすためにSLを狭めたりTPを遠ざけない。BUY:SL<entry<TP、SELL:TP<entry<SL。Entryの現在約定側価格との距離<=1.75*15mATR（ENTER_NOWは0.25）、SL距離>=0.35*15mATR。制約に合わなければNO_TRADE。
 時刻不足/古い完成足、最新bidと1h終値の大きな乖離、材料矛盾を考慮する。構造/短期反発を否定できず合理的な案がない場合NO_TRADE:品質0、価格3項目null、方向評価は保持。入力にない価格水準を作らず、未測定の期待値/勝率を主張しない。"""
 
-MGMT_INSTRUCTIONS = f"""FXの既存建玉/注文を今後4〜12時間の構造と最新市場材料で管理する。新規Entry分析とは独立。
+MGMT_INSTRUCTIONS = f"""FXの既存建玉/注文を今後4〜12時間の構造と最新市場材料で管理する。新規Entry分析とは独立。resultsの各銘柄欄に管理判断を1つだけ返す。
 {FEATURE_LEGEND}
 {MARKET_CONTEXT_RULES}
 ctx.prev_actionと比較し、変化がなければHOLD/KEEP_ORDER。材料が変われば従来判断に固執しない。含み損を理由にSLを損失側へ広げない。日足逆行だけで即決済せず4h/1h構造と材料を合わせる。
@@ -271,10 +280,24 @@ def _response_json_with_retry(*, label: str, create_kwargs: dict, initial_max_to
         try:
             if status == "incomplete":
                 raise json.JSONDecodeError("incomplete response", response.output_text or "", 0)
-            parsed = json.loads(response.output_text)
-            if not isinstance(parsed, dict) or not isinstance(parsed.get("results"), list):
+            parsed = json.loads(response.output_text, object_pairs_hook=_unique_json_object)
+            if not isinstance(parsed, dict):
                 raise ValueError("invalid results envelope")
-            rows = parsed["results"]
+            results = parsed.get("results")
+            schema = create_kwargs.get("text", {}).get("format", {}).get("schema", {})
+            result_schema = schema.get("properties", {}).get("results", {})
+            if result_schema.get("type") == "object":
+                expected = result_schema["required"]
+                if not isinstance(results, dict) or set(results) != set(expected):
+                    raise ValueError("missing or unexpected result symbols")
+                if any(not isinstance(row, dict) or "symbol" in row for row in results.values()):
+                    raise ValueError("invalid result row")
+                rows = [dict(results[s], symbol=s) for s in expected]
+                parsed["results"] = rows
+            else:
+                if not isinstance(results, list):
+                    raise ValueError("invalid results envelope")
+                rows = results
             if any(not isinstance(row, dict) or not isinstance(row.get("symbol"), str) for row in rows):
                 raise ValueError("invalid result row")
             symbols = [row["symbol"] for row in rows]
@@ -319,7 +342,7 @@ def _request_entry(items: list[dict], model_name: str) -> tuple[dict[str, dict],
                 "reasoning": {"effort": MARKET_REASONING_EFFORT, "context": "current_turn"},
                 "text": {
                     "verbosity": "low",
-                    "format": {"type": "json_schema", "name": "fx_entry_batch", "strict": True, "schema": ENTRY_BATCH_SCHEMA},
+                    "format": {"type": "json_schema", "name": "fx_entry_batch", "strict": True, "schema": _batch_result_schema(ENTRY_RESULT_SCHEMA, items)},
                 },
                 "store": False,
             },
@@ -427,7 +450,7 @@ def _request_management(items: list[dict], model_name: str) -> dict[str, dict]:
                 "reasoning": {"effort": MANAGEMENT_REASONING_EFFORT, "context": "current_turn"},
                 "text": {
                     "verbosity": "low",
-                    "format": {"type": "json_schema", "name": "fx_management_batch", "strict": True, "schema": MGMT_BATCH_SCHEMA},
+                    "format": {"type": "json_schema", "name": "fx_management_batch", "strict": True, "schema": _batch_result_schema(MGMT_RESULT_SCHEMA, items)},
                 },
                 "store": False,
             },
